@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.pyo
+pruner.yaml
+pruner.yml
+pruner.json
+.idea/
+.vscode/
