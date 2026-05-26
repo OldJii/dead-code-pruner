@@ -1,0 +1,34 @@
+# dead-code-pruner configuration
+#
+# Copy this file to pruner.yaml and customize for your project.
+
+# Step 1: Constants to replace with boolean literals.
+# Each entry maps a code expression to true or false.
+# Supports field access (BuildConfig.DEBUG), method calls (isFeatureEnabled()),
+# and fully qualified names (com.example.BuildConfig.DEBUG).
+replacements:
+  - pattern: "BuildConfig.IS_PRODUCTION"
+    value: true
+  - pattern: "BuildConfig.IS_LEGACY"
+    value: false
+  # - pattern: "FeatureFlags.isOldFlow"
+  #   value: false
+
+# Step 6: Dead method cleanup configuration (optional).
+dead_methods:
+  # Method name patterns to skip (substring match).
+  # Useful for generated methods that shouldn't be removed.
+  skip_method_patterns:
+    - "__find_views_"
+    # - "onBind"
+
+  # Directory path patterns to skip (substring match on full path).
+  # Files in matching directories are excluded from dead method analysis.
+  skip_dir_patterns: []
+    # - "/generated/"
+    # - "/test/"
+
+  # Additional directory names to skip entirely during file collection.
+  skip_dirs: []
+    # - "test_data"
+    # - "fixtures"
