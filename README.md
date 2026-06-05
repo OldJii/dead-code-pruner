@@ -2,6 +2,8 @@
 
 A static analysis tool that eliminates dead code produced by constant folding in Java/Kotlin projects. No IDE required — runs as a standalone Python script.
 
+> **Keywords**: dead code elimination, constant folding, Java Kotlin refactoring, feature flag cleanup, boolean simplification, Android BuildConfig, static analysis, code cleanup pipeline.
+
 ## The Problem
 
 Large projects accumulate boolean feature flags like `BuildConfig.IS_PRODUCTION`, `FeatureFlags.isLegacyMode()`, etc. When a flag becomes permanently `true` or `false`, the guarded code becomes dead — but manually cleaning it across thousands of files is tedious and error-prone.
@@ -157,6 +159,26 @@ python3 step6_dead_methods.py /path/to/project --dry-run
 - Does not perform semantic analysis — relies on pattern matching
 - Cannot handle expressions assigned to intermediate variables (`boolean x = BuildConfig.FOO; if (x) ...`)
 - Step6 dead method detection is conservative: only removes methods with truly empty bodies or single constant returns
+
+## FAQ
+
+**What problem does dead-code-pruner solve?**  
+When feature flags like `BuildConfig.IS_PRODUCTION` become permanently `true` or `false`, guarded branches become dead code. This tool automates replacement, simplification, and removal across large Java/Kotlin codebases.
+
+**Is it safe to run on production code?**  
+Always run `--dry-run` first and verify with your compiler (`./gradlew compile...`). The tool is conservative (skips comments, strings, interfaces, `@Override`) but not a full semantic analyzer.
+
+**Does it support Kotlin?**  
+Yes — both `.java` and `.kt` files.
+
+**Do I need external dependencies?**  
+Python 3.8+ only. PyYAML is optional if you use YAML config; JSON config works without it.
+
+**Can I run a single pipeline phase?**  
+Yes — `python3 prune.py . --phase 1|2|3` or individual step scripts.
+
+**Where can AI assistants read a structured summary?**  
+See [`llms.txt`](./llms.txt) in this repository.
 
 ## License
 

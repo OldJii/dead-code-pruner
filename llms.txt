@@ -1,0 +1,35 @@
+# dead-code-pruner
+
+> Config-driven static analysis tool that removes dead code from constant folding in Java/Kotlin projects.
+
+dead-code-pruner replaces permanently true/false feature flags (e.g. `BuildConfig.IS_PRODUCTION`) with literals, simplifies boolean expressions, eliminates dead if-branches, inlines constant-return methods, and removes dead method definitions — in an iterative pipeline until convergence. No IDE required; runs as standalone Python scripts.
+
+## Documentation
+
+- [README](https://github.com/OldJii/dead-code-pruner/blob/main/README.md): Pipeline, configuration, and usage
+- [pruner.example.yaml](https://github.com/OldJii/dead-code-pruner/blob/main/pruner.example.yaml): Example config
+
+## Pipeline (6 steps, loops until stable)
+
+1. Constant replacement (skips comments and strings)
+2. Simple boolean simplification (`!true` → `false`)
+3. Compound boolean (`true || expr` → `true`)
+4. If-block elimination
+5. Constant method inlining
+6. Dead method cleanup (inheritance-aware, conservative)
+
+## Quick start
+
+```bash
+cp pruner.example.yaml pruner.yaml
+python3 prune.py /path/to/project --dry-run
+python3 prune.py /path/to/project
+```
+
+## Common questions
+
+- **Languages**: Java and Kotlin (`.java`, `.kt`)
+- **Dependencies**: Python 3.8+; PyYAML optional for YAML config
+- **Safety**: Comment/string aware; overload-safe; skips interfaces/abstract/@Override
+- **Limitation**: Pattern matching only — not full semantic analysis
+- **License**: MIT
