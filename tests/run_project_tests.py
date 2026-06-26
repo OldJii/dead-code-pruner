@@ -14,6 +14,7 @@ sys.path.insert(0, PROJECT_DIR)
 
 from pruner.steps.method_inline import step5_project  # noqa: E402
 from pruner.steps.dead_methods import step6_project    # noqa: E402
+from pruner.pipeline import run_full_pipeline           # noqa: E402
 
 
 def run_dir_test(test_name, test_dir, step_fn):
@@ -66,6 +67,15 @@ def run_dir_test(test_name, test_dir, step_fn):
     return failed == 0
 
 
+def run_full_pipeline_test(test_name, test_dir):
+    config = os.path.join(SCRIPT_DIR, 'pruner.yaml')
+    return run_dir_test(
+        test_name,
+        test_dir,
+        lambda work_dir: run_full_pipeline(work_dir, config),
+    )
+
+
 def main():
     print("=" * 60)
     print("Dead Code Pruner - Project-Level Test Suite (Step 5 & 6)")
@@ -81,6 +91,9 @@ def main():
 
     step6_enhanced = os.path.join(SCRIPT_DIR, 'step6_enhanced')
     results.append(run_dir_test('step6_enhanced', step6_enhanced, step6_project))
+
+    full_pipeline = os.path.join(SCRIPT_DIR, 'full_pipeline_semantic')
+    results.append(run_full_pipeline_test('full_pipeline', full_pipeline))
 
     valid = [r for r in results if r is not None]
     passed = sum(1 for r in valid if r)

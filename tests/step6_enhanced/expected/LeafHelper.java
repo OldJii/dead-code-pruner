@@ -27,8 +27,6 @@ public class LeafHelper {
       System.out.println("feature on");
     }
     reset();
-    if (true) {
-      System.out.println("old flag");
-    }
+    System.out.println("old flag");
   }
 }

@@ -47,7 +47,8 @@ def _phase_header(phase: int, label: str, round_num: int):
 # ── Phase 1 ───────────────────────────────────────────────────
 
 def _run_steps_1_4(target: str, replacements: list, dry_run: bool,
-                    label: str = "Steps 1-4") -> int:
+                    label: str = "Steps 1-4",
+                    prefilter_replacements: bool = True) -> int:
     """Run step1-4 on all files under *target*, return number of files changed."""
     cnt = 0
     t0 = time.time()
@@ -63,8 +64,13 @@ def _run_steps_1_4(target: str, replacements: list, dry_run: bool,
             if run_pipeline(orig, replacements, is_kt, ext=ext) != orig:
                 cnt = 1
     else:
-        # Pre-filter: only process files containing replacement patterns
-        pattern_bytes = [pat.encode('utf-8') for pat, _ in replacements] if replacements else []
+        # Initial Phase 1 can skip files without configured constants. Cascades
+        # must not, because step5/6 commonly create fresh `if true/false`
+        # expressions that no longer contain the original replacement pattern.
+        pattern_bytes = (
+            [pat.encode('utf-8') for pat, _ in replacements]
+            if replacements and prefilter_replacements else []
+        )
         all_targets: list[str] = []
         for dp, dns, fns in os.walk(target):
             dns[:] = [d for d in dns if d not in SKIP_DIRS]
@@ -141,7 +147,10 @@ def run_phase_2(target: str, replacements: list, dry_run: bool) -> tuple[int, fl
 
         cascade_cnt = 0
         if inline_cnt > 0 and not dry_run:
-            cascade_cnt = _run_steps_1_4(target, replacements, dry_run, "cascade")
+            cascade_cnt = _run_steps_1_4(
+                target, replacements, dry_run, "cascade",
+                prefilter_replacements=False,
+            )
 
         total += inline_cnt + cascade_cnt
         print(f"  Round {r}: inline={inline_cnt}, cascade={cascade_cnt}")
@@ -169,7 +178,10 @@ def run_phase_3(target: str, replacements: list, dry_run: bool) -> tuple[int, fl
 
         cascade_cnt = 0
         if dead_cnt > 0 and not dry_run:
-            cascade_cnt = _run_steps_1_4(target, replacements, dry_run, "cascade")
+            cascade_cnt = _run_steps_1_4(
+                target, replacements, dry_run, "cascade",
+                prefilter_replacements=False,
+            )
 
         total += dead_cnt + cascade_cnt
         print(f"  Round {r}: dead={dead_cnt}, cascade={cascade_cnt}")

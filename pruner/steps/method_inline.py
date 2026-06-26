@@ -18,6 +18,7 @@ from ..analysis.ref_index import (
 )
 from ..analysis.code_edit import (
     replace_calls_in_content, clean_standalone_booleans, delete_line_ranges,
+    has_dynamic_symbol_ref,
 )
 
 
@@ -66,7 +67,7 @@ def step5_project(root_dir: str, dry_run: bool = False) -> int:
             print(f"    {m['class_name']}.{m['name']}() -> {m['value']}  [{rel}]")
         return len(all_methods)
 
-    ref_index = build_ref_index(all_files)
+    ref_index = build_ref_index(collect_files(root_dir, include_reference_files=True))
     files_modified: set[str] = set()
     total_inlined = 0
 
@@ -132,7 +133,11 @@ def step5_project(root_dir: str, dry_run: bool = False) -> int:
                         for i, line in enumerate(lines):
                             if cm['decl_start'] <= i <= cm['decl_end']:
                                 continue
-                            if call_pat.search(line) and not is_in_comment_or_string(line, call_pat.search(line).start()):
+                            mref = call_pat.search(line)
+                            if has_dynamic_symbol_ref(line, dm['name']):
+                                has_ref = True
+                                break
+                            if mref and not is_in_comment_or_string(line, mref.start()):
                                 has_ref = True
                                 break
                         if not has_ref:

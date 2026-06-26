@@ -17,18 +17,12 @@ public class BooleanEdgeCases {
 
   // 场景4：else if (false) { } 应整块删除
   public void testElseIfFalse() {
-    if (true) {
-    } else if (false) {
-    } else {
-    }
+
   }
 
   // 场景5：if (false) { } else if (real) { } → if (real) { }
   public void testIfFalseElseIf() {
-    if (false) {
-    } else if (true) {
-    } else {
-    }
+
   }
 
   // 场景6：三元表达式 false ? x : y → y

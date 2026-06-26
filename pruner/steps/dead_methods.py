@@ -22,10 +22,24 @@ from ..analysis.class_hierarchy import enhance_safety, is_framework_class
 from ..analysis.code_edit import (
     replace_calls_in_content, remove_void_calls_in_content,
     clean_standalone_booleans, delete_line_ranges, has_cross_file_refs,
+    has_dynamic_symbol_ref,
 )
 from ..analysis.method_scanner import scan_methods
 from ..steps.bool_simplify import step2_simple
 from ..steps.compound_bool import step3_compound
+from ..steps.if_blocks import step4_if_blocks
+
+
+def _method_key(method: dict) -> tuple:
+    """Stable project-level identity for a method candidate."""
+    return (
+        os.path.abspath(method.get('filepath', '')),
+        method.get('class_name'),
+        method.get('name'),
+        method.get('param_count', 0),
+        method.get('decl_start'),
+        method.get('decl_end'),
+    )
 
 
 def step6_project(root_dir: str, dry_run: bool = False) -> int:
@@ -36,6 +50,7 @@ def step6_project(root_dir: str, dry_run: bool = False) -> int:
     # ── Phase 1: Unified scan ───────────────────────────────
     scan = scan_project(root_dir, progress_interval=500)
     all_files   = scan.all_files
+    ref_files   = scan.ref_files
     all_dead    = scan.dead_methods
     ref_index   = dict(scan.ref_index)
 
@@ -76,10 +91,10 @@ def step6_project(root_dir: str, dry_run: bool = False) -> int:
 
     # ── Phase 3: Iterative call replacement ─────────────────
     iteration = 0
-    processed_names: set[str] = set()
+    processed_methods: set[tuple] = set()
     for iteration in range(5):
         new_dead = [dm for dm in all_dead
-                    if dm.get('safe_to_inline') and dm['name'] not in processed_names]
+                    if dm.get('safe_to_inline') and _method_key(dm) not in processed_methods]
         if not new_dead:
             break
         print(f"\n  Phase 3 · round {iteration+1}: processing {len(new_dead)} methods...")
@@ -90,7 +105,7 @@ def step6_project(root_dir: str, dry_run: bool = False) -> int:
             if (i + 1) % 100 == 0:
                 print(f"\r    Replacing calls... {i+1}/{len(new_dead)}", end='', flush=True)
 
-            processed_names.add(dm['name'])
+            processed_methods.add(_method_key(dm))
             name  = dm['name']
             kind  = dm['kind']
             value = dm.get('value')
@@ -162,6 +177,7 @@ def step6_project(root_dir: str, dry_run: bool = False) -> int:
                         prev = cb
                         cb = step2_simple(cb)
                         cb = step3_compound(cb)
+                        cb = step4_if_blocks(cb, ext in ('.kt', '.kts'))
                         if cb == prev:
                             break
                     if cb != original_cb:
@@ -185,7 +201,7 @@ def step6_project(root_dir: str, dry_run: bool = False) -> int:
     print("\n  Phase 4: Deleting unreferenced method definitions...")
     t_del = time.time()
     print("    Rebuilding reference index after call replacement...")
-    ref_index = build_ref_index(all_files)
+    ref_index = build_ref_index(ref_files)
 
     by_file: dict[str, list] = {}
     for dm in all_dead:
@@ -302,7 +318,7 @@ def _has_same_file_refs_direct(method_name: str, param_count: int,
             continue
         if line.strip().startswith('//') or line.strip().startswith('/*'):
             continue
-        if call_pat.search(line) or ref_pat.search(line):
+        if call_pat.search(line) or ref_pat.search(line) or has_dynamic_symbol_ref(line, method_name):
             return True
     return False
 

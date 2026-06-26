@@ -31,9 +31,9 @@ def build_class_hierarchy(all_files: list[str]):
     final_classes: set[str]     = set()
     iface_abstract: set[str]    = set()
     implements: set[str]        = set()
-    extends_pat = re.compile(r'\b(?:class|object)\s+(\w+)\s+(?:extends|:)\s+(\w+)')
+    extends_pat = re.compile(r'\b(?:final\s+)?(?:class|object)\s+(\w+)\s*(?::|extends)\s+(\w+)')
     final_pat   = re.compile(r'\bfinal\s+class\s+(\w+)')
-    iface_pat   = re.compile(r'\b(?:interface|abstract\s+class)\s+(\w+)')
+    iface_pat   = re.compile(r'\b(?:interface|protocol|abstract\s+class)\s+(\w+)')
     impl_pat    = re.compile(r'\bclass\s+(\w+)[^{]*\bimplements\s+')
 
     for fp in all_files:

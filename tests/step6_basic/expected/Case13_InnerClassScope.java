@@ -13,12 +13,7 @@ public class OuterClass {
   }
 
   private void useFlags() {
-    if (false) {
-      System.out.println("outer");
-    }
-    if (true) {
-      System.out.println("after inner");
-    }
+    System.out.println("after inner");
   }
 
   private static class AnotherInner {

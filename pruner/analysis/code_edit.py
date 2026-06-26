@@ -6,7 +6,21 @@ boolean cleanup, line-range deletion, and cross-file reference detection.
 
 import os
 import re
-from .ref_index import is_in_comment_or_string
+from .ref_index import REFERENCE_EXTS, is_in_comment_or_string
+
+
+def _is_reference_file(path: str) -> bool:
+    return os.path.splitext(path)[1].lower() in REFERENCE_EXTS
+
+
+def has_dynamic_symbol_ref(content: str, method_name: str) -> bool:
+    selector = re.escape(method_name)
+    patterns = (
+        r'#selector\s*\([^)]*\b' + selector + r'\b',
+        r'\bselector="' + selector + r'\b',
+        r'\baction="' + selector + r'\b',
+    )
+    return any(re.search(p, content) for p in patterns)
 
 
 def replace_calls_in_content(content: str, method_name: str, value: str,
@@ -126,8 +140,10 @@ def _has_call_site(content: str, method_name: str) -> bool:
     are already covered by the qualified/contextual strategies.
     """
     needle = method_name + '('
-    if needle not in content:
+    if needle not in content and not has_dynamic_symbol_ref(content, method_name):
         return False
+    if has_dynamic_symbol_ref(content, method_name):
+        return True
 
     has_local_def = False
     for line in content.split('\n'):
@@ -190,6 +206,10 @@ def has_cross_file_refs(dm: dict, ref_index: dict, src_abs: str) -> bool:
                 rc = fh.read()
         except Exception:
             continue
+        if _is_reference_file(rf) and has_dynamic_symbol_ref(rc, name):
+            return True
+        if has_dynamic_symbol_ref(rc, name):
+            return True
         qualified = cls + '.' + name if cls else ''
         if qualified and qualified in rc:
             return True

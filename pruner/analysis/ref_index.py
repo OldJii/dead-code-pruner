@@ -9,23 +9,44 @@ from collections import defaultdict
 from ..lang import _PARSERS, SKIP_DIRS
 
 
-def collect_files(root_dir: str) -> list[str]:
-    """Walk *root_dir* and collect all source files with supported extensions."""
+REFERENCE_EXTS = frozenset({
+    '.storyboard', '.xib', '.plist', '.xml', '.json',
+})
+
+_CALL_PAT = re.compile(r'\b(\w+)\s*\(')
+_REF_PAT = re.compile(r'::(\w+)\b')
+_SWIFT_SELECTOR_PAT = re.compile(
+    r'#selector\s*\(\s*(?:getter:\s*|setter:\s*)?(?:(?:\w+)\.)?(\w+)\b')
+_IB_SELECTOR_PAT = re.compile(r'\bselector="([A-Za-z_]\w*)')
+
+
+def collect_files(root_dir: str, *, include_reference_files: bool = False) -> list[str]:
+    """Walk *root_dir* and collect source files, plus semantic reference files when requested."""
     files = []
     supported = frozenset(_PARSERS.keys())
     for dp, dns, fns in os.walk(root_dir):
         dns[:] = [d for d in dns if d not in SKIP_DIRS]
         for fn in fns:
             ext = os.path.splitext(fn)[1].lower()
-            if ext in supported:
+            if ext in supported or (include_reference_files and ext in REFERENCE_EXTS):
                 files.append(os.path.join(dp, fn))
     return files
 
 
+def iter_reference_names(content: str):
+    """Yield symbol names that may represent call sites or dynamic references."""
+    for m in _CALL_PAT.finditer(content):
+        yield m.group(1)
+    for m in _REF_PAT.finditer(content):
+        yield m.group(1)
+    for m in _SWIFT_SELECTOR_PAT.finditer(content):
+        yield m.group(1)
+    for m in _IB_SELECTOR_PAT.finditer(content):
+        yield m.group(1)
+
+
 def build_ref_index(all_files: list[str], *, quiet: bool = False) -> dict[str, set[str]]:
     """Build a ``{method_name: {filepath, …}}`` reverse index."""
-    call_pat = re.compile(r'\b(\w+)\s*\(')
-    ref_pat  = re.compile(r'::(\w+)\b')
     index: dict[str, set[str]] = defaultdict(set)
     total = len(all_files)
     for idx, fp in enumerate(all_files):
@@ -36,12 +57,7 @@ def build_ref_index(all_files: list[str], *, quiet: bool = False) -> dict[str, s
                 content = f.read()
         except Exception:
             continue
-        for m in call_pat.finditer(content):
-            name = m.group(1)
-            if len(name) > 2:
-                index[name].add(fp)
-        for m in ref_pat.finditer(content):
-            name = m.group(1)
+        for name in iter_reference_names(content):
             if len(name) > 2:
                 index[name].add(fp)
     if not quiet and total > 100:

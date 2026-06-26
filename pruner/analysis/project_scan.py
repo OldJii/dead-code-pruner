@@ -12,25 +12,25 @@ from collections import defaultdict
 
 from ..lang import _PARSERS, SKIP_DIRS
 from .method_scanner import scan_methods
+from .ref_index import REFERENCE_EXTS, iter_reference_names
 
 
-_CALL_PAT   = re.compile(r'\b(\w+)\s*\(')
-_REF_PAT    = re.compile(r'::(\w+)\b')
-_EXTENDS    = re.compile(r'\b(?:class|object)\s+(\w+)\s+(?:extends|:)\s+(\w+)')
+_EXTENDS    = re.compile(r'\b(?:final\s+)?(?:class|object)\s+(\w+)\s*(?::|extends)\s+(\w+)')
 _FINAL_CLS  = re.compile(r'\bfinal\s+class\s+(\w+)')
-_IFACE_ABS  = re.compile(r'\b(?:interface|abstract\s+class)\s+(\w+)')
+_IFACE_ABS  = re.compile(r'\b(?:interface|protocol|abstract\s+class)\s+(\w+)')
 _IMPL       = re.compile(r'\bclass\s+(\w+)[^{]*\bimplements\s+')
 
 
 class ProjectScanResult:
     """Container for all data collected during a unified project scan."""
 
-    __slots__ = ('all_files', 'dead_methods', 'ref_index',
+    __slots__ = ('all_files', 'ref_files', 'dead_methods', 'ref_index',
                  'children_map', 'final_classes', 'iface_abstract',
                  'implements', 'elapsed')
 
     def __init__(self):
         self.all_files: list[str]               = []
+        self.ref_files: list[str]               = []
         self.dead_methods: list[dict]            = []
         self.ref_index: dict[str, set[str]]      = defaultdict(set)
         self.children_map: dict[str, set[str]]   = defaultdict(set)
@@ -50,13 +50,17 @@ def scan_project(root_dir: str, *, progress_interval: int = 500) -> ProjectScanR
     result = ProjectScanResult()
     supported = frozenset(_PARSERS.keys())
 
-    # Phase A: collect file list
+    # Phase A: collect source files and semantic reference files.
     for dp, dns, fns in os.walk(root_dir):
         dns[:] = [d for d in dns if d not in SKIP_DIRS]
         for fn in fns:
             ext = os.path.splitext(fn)[1].lower()
             if ext in supported:
-                result.all_files.append(os.path.join(dp, fn))
+                fp = os.path.join(dp, fn)
+                result.all_files.append(fp)
+                result.ref_files.append(fp)
+            elif ext in REFERENCE_EXTS:
+                result.ref_files.append(os.path.join(dp, fn))
 
     total = len(result.all_files)
     dead_count = 0
@@ -90,12 +94,7 @@ def scan_project(root_dir: str, *, progress_interval: int = 500) -> ProjectScanR
             print(f"\n  WARN scan {fp}: {e}", file=sys.stderr)
 
         # 2) Reference index (method calls + method references)
-        for m in _CALL_PAT.finditer(content):
-            name = m.group(1)
-            if len(name) > 2:
-                result.ref_index[name].add(fp)
-        for m in _REF_PAT.finditer(content):
-            name = m.group(1)
+        for name in iter_reference_names(content):
             if len(name) > 2:
                 result.ref_index[name].add(fp)
 
@@ -108,6 +107,20 @@ def scan_project(root_dir: str, *, progress_interval: int = 500) -> ProjectScanR
             result.iface_abstract.add(m.group(1))
         for m in _IMPL.finditer(content):
             result.implements.add(m.group(1))
+
+    # Phase C: include non-source semantic references, e.g. Storyboard/XIB selectors.
+    source_set = set(result.all_files)
+    for fp in result.ref_files:
+        if fp in source_set:
+            continue
+        try:
+            with open(fp, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+        except Exception:
+            continue
+        for name in iter_reference_names(content):
+            if len(name) > 2:
+                result.ref_index[name].add(fp)
 
     result.elapsed = time.time() - t0
     print(f"\n  Scan complete: {dead_count} dead methods, "
