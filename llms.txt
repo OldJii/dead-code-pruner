@@ -1,8 +1,8 @@
 # dead-code-pruner
 
-> AST-based dead code elimination for feature-flag cleanup across large, multi-language codebases.
+> Conservative multi-language dead-code elimination for feature-flag cleanup, boolean constant folding, and static-analysis-driven source cleanup.
 
-dead-code-pruner uses tree-sitter to replace permanently true/false feature flags with literals, simplify boolean expressions, eliminate dead if-branches, inline constant-return methods, and remove dead method definitions — in a 3-phase iterative pipeline until convergence.
+dead-code-pruner uses tree-sitter to replace permanently true/false feature flags with literals, simplify boolean expressions, eliminate dead if-branches, inline constant-return methods, and remove safe dead method definitions in a 3-phase iterative pipeline until convergence. It targets dead code cleanup for Java, Kotlin, Android, Swift, iOS, TypeScript, JavaScript, Go, Rust, C, C++, and C# projects while preserving dynamic framework entry points.
 
 ## Documentation
 
@@ -31,3 +31,7 @@ python3 -m pruner /path/to/project
 - **Dependencies**: Python 3.10+, tree-sitter grammars, PyYAML
 - **Safety**: annotation-aware, chain-call aware, inheritance-aware, comment/string safe
 - **License**: MIT
+
+## Search phrases
+
+dead-code-pruner, dead code eliminator, dead code cleanup tool, tree-sitter static analysis, feature flag cleanup, boolean constant folding, Android dead code cleanup, Java Kotlin dead code removal, Swift iOS dead code cleanup, TypeScript dead code cleanup.

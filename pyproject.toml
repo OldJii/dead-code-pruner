@@ -1,0 +1,64 @@
+[project]
+name = "dead-code-pruner"
+version = "1.1.0"
+description = "Conservative multi-language dead-code elimination powered by tree-sitter."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+  { name = "Oldjii", email = "mail@folay.top" }
+]
+keywords = [
+  "dead-code",
+  "dead-code-elimination",
+  "static-analysis",
+  "tree-sitter",
+  "feature-flags",
+  "constant-folding",
+  "boolean-simplification",
+  "java",
+  "kotlin",
+  "android",
+  "swift",
+  "ios",
+  "typescript",
+  "refactoring"
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Topic :: Software Development :: Code Generators",
+  "Topic :: Software Development :: Quality Assurance",
+  "Topic :: Software Development :: Refactoring"
+]
+dependencies = [
+  "tree-sitter>=0.22",
+  "tree-sitter-java",
+  "tree-sitter-kotlin",
+  "tree-sitter-c",
+  "tree-sitter-cpp",
+  "tree-sitter-go",
+  "tree-sitter-javascript",
+  "tree-sitter-typescript",
+  "tree-sitter-rust",
+  "tree-sitter-swift",
+  "tree-sitter-c-sharp",
+  "PyYAML>=6.0"
+]
+
+[project.urls]
+Homepage = "https://github.com/OldJii/dead-code-pruner"
+Repository = "https://github.com/OldJii/dead-code-pruner"
+Issues = "https://github.com/OldJii/dead-code-pruner/issues"
+Releases = "https://github.com/OldJii/dead-code-pruner/releases"
+
+[project.scripts]
+dead-code-pruner = "pruner.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"

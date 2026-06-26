@@ -1,8 +1,12 @@
 # dead-code-pruner
 
-AST-based dead code elimination for large codebases. Give it a constant mapping — it folds feature flags, simplifies boolean expressions, inlines constant-return methods, and removes dead method definitions in an iterative pipeline until convergence.
+Conservative multi-language dead-code elimination powered by tree-sitter.
+
+dead-code-pruner is a static analysis and source cleanup tool for removing dead code after feature flag cleanup, boolean constant folding, and compile-time configuration changes. Give it a constant mapping and it folds configured flags, simplifies boolean/control-flow expressions, eliminates dead branches, inlines constant-return methods, removes safe dead methods, and protects dynamic framework entry points through iterative project-level analysis.
 
 Built on [tree-sitter](https://tree-sitter.github.io/) for format-agnostic, comment-safe, multi-language analysis.
+
+Keywords: dead code elimination, dead code cleanup, static analysis, tree-sitter, feature flag cleanup, boolean simplification, constant folding, Java dead code, Kotlin dead code, Android dead code cleanup, Swift dead code, iOS dead code, TypeScript dead code, refactoring automation.
 
 ## The Problem
 
