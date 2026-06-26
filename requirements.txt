@@ -1,0 +1,12 @@
+tree-sitter>=0.22
+tree-sitter-java
+tree-sitter-kotlin
+tree-sitter-c
+tree-sitter-cpp
+tree-sitter-go
+tree-sitter-javascript
+tree-sitter-typescript
+tree-sitter-rust
+tree-sitter-swift
+tree-sitter-c-sharp
+PyYAML>=6.0

@@ -1,184 +1,157 @@
 # dead-code-pruner
 
-A static analysis tool that eliminates dead code produced by constant folding in Java/Kotlin projects. No IDE required — runs as a standalone Python script.
+AST-based dead code elimination for large codebases. Give it a constant mapping — it folds feature flags, simplifies boolean expressions, inlines constant-return methods, and removes dead method definitions in an iterative pipeline until convergence.
 
-> **Keywords**: dead code elimination, constant folding, Java Kotlin refactoring, feature flag cleanup, boolean simplification, Android BuildConfig, static analysis, code cleanup pipeline.
+Built on [tree-sitter](https://tree-sitter.github.io/) for format-agnostic, comment-safe, multi-language analysis.
 
 ## The Problem
 
-Large projects accumulate boolean feature flags like `BuildConfig.IS_PRODUCTION`, `FeatureFlags.isLegacyMode()`, etc. When a flag becomes permanently `true` or `false`, the guarded code becomes dead — but manually cleaning it across thousands of files is tedious and error-prone.
+Projects accumulate boolean feature flags (`AppConfig.IS_DEBUG`, `FeatureFlags.LEGACY_MODE`, compile-time constants, etc.). When a flag becomes permanently `true` or `false`, the guarded code is dead — but cleaning it manually across thousands of files is tedious and error-prone.
 
-## What This Tool Does
-
-Given a config file that maps expressions to boolean values:
-
-```yaml
-replacements:
-  - pattern: "BuildConfig.IS_PRODUCTION"
-    value: true
-```
-
-The tool performs a 6-step pipeline that iterates until convergence:
-
-1. **Constant replacement**: `BuildConfig.IS_PRODUCTION` → `true` (skips comments and strings)
-2. **Simple boolean**: `!true` → `false`, `true == false` → `false`, etc.
-3. **Compound boolean**: `true || expr` → `true`, `false && expr` → `false`, ternary simplification
-4. **If-block elimination**: `if (true) { A } else { B }` → `A`, `if (false) { A }` → remove
-5. **Constant method inlining**: Methods that only `return true/false` → inline at call sites
-6. **Dead method cleanup**: Empty void methods and constant-returning boolean methods → remove definitions and call sites
-
-Each step can produce new simplification opportunities for subsequent steps. The pipeline loops until no more changes are found.
-
-## Quick Start
-
-```bash
-# 1. Create a config file
-cp pruner.example.yaml pruner.yaml
-# Edit pruner.yaml with your project's constants
-
-# 2. Dry run to see what would change
-python3 prune.py /path/to/your/project --dry-run
-
-# 3. Run the full pipeline
-python3 prune.py /path/to/your/project
-
-# 4. Compile and verify
-cd /path/to/your/project && ./gradlew compileDebugJavaWithJavac
-```
-
-## Configuration
-
-### YAML format (recommended)
+## What It Does
 
 ```yaml
 # pruner.yaml
 replacements:
-  - pattern: "BuildConfig.IS_PRODUCTION"
-    value: true
-  - pattern: "FeatureFlags.isLegacyMode"
+  - pattern: "AppConfig.IS_DEBUG"
     value: false
-  - pattern: "Config.ENABLE_OLD_UI"
-    value: false
-
-dead_methods:
-  skip_method_patterns:
-    - "__generated_"     # skip generated methods
-  skip_dir_patterns:
-    - "/test/"           # skip test directories
-  skip_dirs:
-    - "test_fixtures"    # skip specific directory names
 ```
 
-### JSON format
+The tool runs a **3-phase pipeline** that loops until no more changes are found:
 
-```json
-{
-  "replacements": [
-    { "pattern": "BuildConfig.IS_PRODUCTION", "value": true }
-  ],
-  "dead_methods": {
-    "skip_method_patterns": [],
-    "skip_dir_patterns": [],
-    "skip_dirs": []
-  }
-}
+| Phase | Steps | Purpose |
+|-------|-------|---------|
+| **1** | Constant fold → bool simplify → compound bool → if-block eliminate | Replace flags and simplify control flow |
+| **2** | Inline constant-return methods → cascade simplify | Remove `return true/false` helpers |
+| **3** | Dead method cleanup → cascade simplify | Remove empty void methods and orphaned definitions |
+
+Each phase can trigger new simplification opportunities in earlier steps — the pipeline converges automatically.
+
+## Quick Start
+
+```bash
+git clone https://github.com/OldJii/dead-code-pruner.git
+cd dead-code-pruner
+
+pip install -r requirements.txt
+
+cp pruner.example.yaml /path/to/your/project/pruner.yaml
+# Edit pruner.yaml with your project's constants
+
+# Preview changes
+python3 -m pruner /path/to/your/project --dry-run
+
+# Run full pipeline
+python3 -m pruner /path/to/your/project
 ```
 
 ## Usage
 
 ```bash
-# Full pipeline
-python3 prune.py .
+# Full pipeline (auto-discovers pruner.yaml)
+python3 -m pruner .
 
-# With custom config
-python3 prune.py src/ --config my-config.yaml
+# Explicit config
+python3 -m pruner src/ --config pruner.yaml
 
-# Run specific phase only
-python3 prune.py . --phase 1    # constant folding + boolean simplification
-python3 prune.py . --phase 2    # constant-returning method inlining
-python3 prune.py . --phase 3    # dead method cleanup
+# Dry run — scan and report only
+python3 -m pruner . --dry-run
 
-# Dry run (scan only)
-python3 prune.py . --dry-run
-
-# Run individual steps
-python3 step1_replace_constants.py /path/to/project --config pruner.yaml
-python3 step3_compound_boolean.py /path/to/project
-python3 step6_dead_methods.py /path/to/project --dry-run
+# Run specific phases
+python3 -m pruner . --phases 1          # constant folding only
+python3 -m pruner . --phases 1,2        # phases 1 + 2
 ```
 
-## How It Works
+Shortcut entry point (equivalent to `python3 -m pruner`):
 
-### Pipeline Architecture
-
-```
-                    ┌─────────────────────────────────────────────┐
-                    │              Phase 1 (loop)                 │
-                    │  step1 → step2 → step3 → step4 → converge? │
-                    └─────────────────────────────────────────────┘
-                                       ↓
-                    ┌─────────────────────────────────────────────┐
-                    │              Phase 2 (loop)                 │
-                    │  step5 → step2 → step3 → step4 → converge? │
-                    └─────────────────────────────────────────────┘
-                                       ↓
-                    ┌─────────────────────────────────────────────┐
-                    │              Phase 3 (loop)                 │
-                    │  step6 → step2 → step3 → step4 → converge? │
-                    └─────────────────────────────────────────────┘
+```bash
+python3 run_pruner.py . --config pruner.yaml
 ```
 
-### Step Details
+## Configuration
 
-| Step | Input | Output | Example |
-|------|-------|--------|---------|
-| step1 | `BuildConfig.IS_PRODUCTION` | `true` | Config-driven replacement |
-| step2 | `!true` | `false` | Simple boolean algebra |
-| step3 | `true \|\| A && B` | `true` | Respects operator precedence |
-| step4 | `if (false) { X }` | *(removed)* | Block elimination with dead code removal |
-| step5 | `isLocal()` where `isLocal() { return false; }` | `false` | Method inlining |
-| step6 | `void doNothing() {}` | *(removed)* | Dead method + call site removal |
+### YAML (recommended)
 
-### Safety Mechanisms
+```yaml
+replacements:
+  - pattern: "AppConfig.IS_DEBUG"
+    value: false
+  - pattern: "FeatureFlags.LEGACY_MODE"
+    value: false
+```
 
-- **Comment/string aware**: All replacements skip comments (`//`, `/* */`) and string literals
-- **Operator precedence**: `true || A && B` correctly simplifies to `true`, not `B`
-- **Overload-safe**: Method matching considers parameter count to avoid confusing overloads
-- **Inheritance-aware**: step6 builds a class hierarchy and skips interface methods, abstract methods, `@Override` methods, and methods in classes that `implements` interfaces
-- **Framework-safe**: Base/Abstract/Interface classes are excluded from aggressive cleanup
-- **Chain-safe**: `method().subscribe()` chains are not broken by void call removal
+### Flat key-value format
+
+```yaml
+AppConfig.IS_DEBUG: false
+FeatureFlags.LEGACY_MODE: false
+```
+
+### JSON
+
+```json
+{
+  "replacements": [
+    { "pattern": "AppConfig.IS_DEBUG", "value": false }
+  ]
+}
+```
+
+## Supported Languages
+
+Java, Kotlin, Go, C, C++, JavaScript, TypeScript, Rust, Swift, C# — and any language with a tree-sitter grammar (add one line in `pruner/lang.py`).
+
+## Architecture
+
+```
+pruner/
+├── cli.py              Command-line interface
+├── pipeline.py         3-phase orchestrator with progress output
+├── transform.py        Single-file pipeline (steps 1–4)
+├── lang.py             Language registry (tree-sitter parsers)
+├── ast_utils.py        Core AST manipulation
+├── steps/
+│   ├── constant_fold.py    Step 1: constant replacement
+│   ├── bool_simplify.py    Step 2: simple boolean algebra
+│   ├── compound_bool.py    Step 3: compound boolean + ternary
+│   ├── if_blocks.py        Step 4: dead branch elimination
+│   ├── kotlin_expr.py      Kotlin if-expression pre-pass
+│   ├── method_inline.py    Step 5: constant method inlining
+│   └── dead_methods.py     Step 6: dead method cleanup
+└── analysis/
+    ├── method_scanner.py     AST method detection
+    ├── project_scan.py       Unified single-pass project scan
+    ├── ref_index.py          Cross-file reference index
+    ├── class_hierarchy.py    Inheritance analysis
+    └── code_edit.py          Call-site replacement & deletion
+```
+
+## Safety Mechanisms
+
+- **AST-precise**: tree-sitter precisely distinguishes code from comments and strings
+- **Annotation-safe**: any method with `@Annotation` is never deleted (framework/DI/AOP managed)
+- **Chain-call aware**: instance methods called via `obj.field.method()` are detected via cross-file reference analysis
+- **Inheritance-aware**: skips abstract, interface, and framework base-class methods
+- **Overload-safe**: parameter count matching prevents confusing overloaded methods
+- **Conservative by design**: when in doubt, the method is kept
 
 ## Requirements
 
-- Python 3.8+
-- No external dependencies (PyYAML optional, for YAML config; JSON config works without it)
+- Python 3.10+
+- Dependencies: `pip install -r requirements.txt`
+
+## Testing
+
+```bash
+python3 tests/run_tests.py           # 10-language step 1–4 tests
+python3 tests/run_project_tests.py   # step 5 & 6 project-level tests
+```
 
 ## Limitations
 
-- Designed for Java and Kotlin source files (`.java`, `.kt`)
-- Does not perform semantic analysis — relies on pattern matching
-- Cannot handle expressions assigned to intermediate variables (`boolean x = BuildConfig.FOO; if (x) ...`)
-- Step6 dead method detection is conservative: only removes methods with truly empty bodies or single constant returns
-
-## FAQ
-
-**What problem does dead-code-pruner solve?**  
-When feature flags like `BuildConfig.IS_PRODUCTION` become permanently `true` or `false`, guarded branches become dead code. This tool automates replacement, simplification, and removal across large Java/Kotlin codebases.
-
-**Is it safe to run on production code?**  
-Always run `--dry-run` first and verify with your compiler (`./gradlew compile...`). The tool is conservative (skips comments, strings, interfaces, `@Override`) but not a full semantic analyzer.
-
-**Does it support Kotlin?**  
-Yes — both `.java` and `.kt` files.
-
-**Do I need external dependencies?**  
-Python 3.8+ only. PyYAML is optional if you use YAML config; JSON config works without it.
-
-**Can I run a single pipeline phase?**  
-Yes — `python3 prune.py . --phase 1|2|3` or individual step scripts.
-
-**Where can AI assistants read a structured summary?**  
-See [`llms.txt`](./llms.txt) in this repository.
+- Cannot fold through intermediate variables (`bool x = FLAG; if (x) ...`)
+- Some languages share a C-family parser; edge-case syntax may use dedicated pre-passes
+- Dead method detection is conservative — annotated, public, or potentially-referenced methods are preserved
 
 ## License
 

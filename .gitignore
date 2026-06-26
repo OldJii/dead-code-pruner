@@ -6,3 +6,5 @@ pruner.yml
 pruner.json
 .idea/
 .vscode/
+tests/**/work/
+tests/.tmp_run/

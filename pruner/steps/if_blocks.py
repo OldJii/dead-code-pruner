@@ -1,0 +1,355 @@
+"""Step 4 — if(true)/if(false) block elimination.
+
+Removes dead branches where the condition has been resolved to a constant
+boolean, inlining the live branch and deleting dead code after early exits.
+"""
+
+import re
+from ..ast_utils import parse, find_if_nodes, get_if_parts, is_bool, bstr
+
+_BLOCK_TYPES = frozenset({'block', 'statement_block', 'compound_statement'})
+
+_VAR_DECL_RE_B = re.compile(
+    rb'^\s*(final\s+)?(String|int|long|boolean|float|double|char|byte|short|void|var|val|[A-Z]\w*(<[^>]*>)?)\s+\w+\s*[=;]',
+    re.MULTILINE)
+
+
+# ── byte-level helpers ──────────────────────────────────────
+
+def _get_indent(cb, byte_pos):
+    ls = cb.rfind(b'\n', 0, byte_pos)
+    ls = ls + 1 if ls >= 0 else 0
+    indent = b''
+    for i in range(ls, len(cb)):
+        if cb[i:i+1] in (b' ', b'\t'):
+            indent += cb[i:i+1]
+        else:
+            break
+    return indent, ls
+
+
+def _line_end_b(cb, pos):
+    le = cb.find(b'\n', pos)
+    return le + 1 if le != -1 else len(cb)
+
+
+def _is_block(node):
+    return node.type in _BLOCK_TYPES
+
+
+def _body_text_b(node, cb):
+    if _is_block(node):
+        raw = cb[node.start_byte:node.end_byte]
+        inner = raw[1:-1]
+        lines = inner.split(b'\n')
+        while lines and lines[0].strip() == b'':
+            lines.pop(0)
+        while lines and lines[-1].strip() == b'':
+            lines.pop()
+        return b'\n'.join(l.rstrip() for l in lines)
+    return cb[node.start_byte:node.end_byte].strip()
+
+
+def _reindent_b(body, target):
+    lines = body.split(b'\n')
+    if not lines:
+        return body
+    mi = float('inf')
+    for l in lines:
+        s = l.lstrip()
+        if s:
+            mi = min(mi, len(l) - len(s))
+    if mi == float('inf'):
+        mi = 0
+    out = []
+    for l in lines:
+        s = l.lstrip()
+        if not s:
+            out.append(b'')
+        else:
+            extra = len(l) - len(s) - mi
+            out.append(target + b' ' * max(0, extra) + s)
+    return b'\n'.join(out)
+
+
+def _has_exit_b(body):
+    lines = body.strip().split(b'\n')
+    if not lines:
+        return False
+    brace = paren = 0
+    waiting = True
+    last_exit = False
+    for line in lines:
+        s = line.strip()
+        if not s or s.startswith(b'//'):
+            continue
+        if waiting and brace == 0 and paren == 0:
+            last_exit = bool(re.match(rb'^(return\b|throw\b|panic\s*\(|break\s*;?|continue\s*;?)', s))
+            waiting = False
+        for c in s:
+            if c == ord('{'):
+                brace += 1
+            elif c == ord('}'):
+                brace -= 1
+                if brace <= 0:
+                    brace = 0
+                    waiting = True
+            elif c == ord('('):
+                paren += 1
+            elif c == ord(')'):
+                paren -= 1
+                if paren < 0:
+                    paren = 0
+            elif c == ord(';') and brace == 0 and paren == 0:
+                waiting = True
+    return last_exit
+
+
+def _find_dead_end_b(cb, start_pos):
+    depth = 0
+    i = start_pos
+    n = len(cb)
+    case_re = re.compile(rb'\bcase\s+\w')
+    default_re = re.compile(rb'\bdefault\s*:')
+    while i < n:
+        c = cb[i:i+1]
+        if c == b'/' and i + 1 < n:
+            c2 = cb[i+1:i+2]
+            if c2 == b'/':
+                end = cb.find(b'\n', i)
+                i = end if end != -1 else n
+                continue
+            elif c2 == b'*':
+                end = cb.find(b'*/', i + 2)
+                i = end + 2 if end != -1 else n
+                continue
+        elif c == b'"':
+            i += 1
+            while i < n and cb[i:i+1] != b'"':
+                if cb[i:i+1] == b'\\':
+                    i += 1
+                i += 1
+            i += 1
+            continue
+        elif c == b"'":
+            i += 1
+            while i < n and cb[i:i+1] != b"'":
+                if cb[i:i+1] == b'\\':
+                    i += 1
+                i += 1
+            i += 1
+            continue
+        elif c == b'{':
+            depth += 1
+        elif c == b'}':
+            if depth == 0:
+                return i
+            depth -= 1
+        elif depth == 0 and c in (b'c', b'd'):
+            if case_re.match(cb, i) or default_re.match(cb, i):
+                return i
+        i += 1
+    return -1
+
+
+def _is_else_if_b(if_node, cb):
+    before_start = if_node.start_byte
+    ls = cb.rfind(b'\n', 0, before_start)
+    ls = ls + 1 if ls >= 0 else 0
+    before = cb[ls:before_start].strip()
+    if before.endswith(b'else'):
+        idx = cb.rfind(b'else', ls, before_start)
+        return True, idx
+    if before.endswith(b'}'):
+        brace_pos = cb.rfind(b'}', ls, before_start)
+        region = cb[brace_pos:before_start]
+        if b'else' in region:
+            idx = cb.rfind(b'else', brace_pos, before_start)
+            return True, idx
+    return False, -1
+
+
+def _alt_text_b(alt_node, cb):
+    raw = cb[alt_node.start_byte:alt_node.end_byte].strip()
+    if raw.startswith(b'else'):
+        raw = raw[4:].strip()
+    return raw
+
+
+# ── main entry ──────────────────────────────────────────────
+
+def step4_if_blocks(cb: bytes, is_kt: bool = False) -> bytes:
+    for _ in range(500):
+        root, cb = parse(cb)
+        mod = False
+
+        for if_node in find_if_nodes(root):
+            cond, cons, alt = get_if_parts(if_node, cb)
+            if not cond or not cons:
+                continue
+            value = is_bool(cond, cb)
+            if not value and cond.type in ('parenthesized_expression', 'tuple_expression'):
+                nc = cond.named_children
+                if len(nc) == 1:
+                    value = is_bool(nc[0], cb)
+            if not value:
+                continue
+
+            indent, ls = _get_indent(cb, if_node.start_byte)
+            is_eif, ekp = _is_else_if_b(if_node, cb)
+            construct_end = _line_end_b(cb, if_node.end_byte - 1)
+
+            if is_eif and ekp >= 0:
+                if value == 'true':
+                    body = _body_text_b(cons, cb)
+                    rep = b'else {\n'
+                    if body.strip():
+                        rep += body + b'\n'
+                    rep += indent + b'}'
+                    cb = cb[:ekp] + rep + b'\n' + cb[construct_end:]
+                else:
+                    if alt:
+                        remaining = b'else ' + _alt_text_b(alt, cb)
+                        cb = cb[:ekp] + remaining + b'\n' + cb[construct_end:]
+                    else:
+                        before = cb[:ekp].rstrip(b' \t')
+                        cb = before + b'\n' + cb[construct_end:]
+                mod = True
+                break
+
+            if not _is_block(cons):
+                stmt = cb[cons.start_byte:cons.end_byte].strip()
+
+                if value == 'false':
+                    if alt:
+                        at = _alt_text_b(alt, cb)
+                        if at.startswith(b'{') and at.endswith(b'}'):
+                            inner_lines = at[1:-1].split(b'\n')
+                            while inner_lines and inner_lines[0].strip() == b'':
+                                inner_lines.pop(0)
+                            while inner_lines and inner_lines[-1].strip() == b'':
+                                inner_lines.pop()
+                            inner_body = b'\n'.join(l.rstrip() for l in inner_lines)
+                            reindented = _reindent_b(inner_body, indent)
+                            cb = cb[:ls] + reindented + b'\n' + cb[construct_end:]
+                        elif at.startswith(b'if'):
+                            cb = cb[:ls] + indent + at + b'\n' + cb[construct_end:]
+                        else:
+                            cb = cb[:ls] + indent + at + b'\n' + cb[construct_end:]
+                    else:
+                        cb = cb[:ls] + cb[construct_end:]
+                elif value == 'true':
+                    is_exit = bool(re.match(rb'^(return\b|throw\b|panic\s*\(|break\b|continue\b)', stmt))
+                    if alt:
+                        if is_exit:
+                            dead_end = _find_dead_end_b(cb, construct_end)
+                            if dead_end != -1:
+                                between = cb[construct_end:dead_end].strip()
+                                if between:
+                                    scope_start = cb.rfind(b'\n', 0, dead_end)
+                                    scope_start = scope_start + 1 if scope_start >= 0 else dead_end
+                                    cb = cb[:ls] + indent + stmt + b'\n' + cb[scope_start:]
+                                else:
+                                    cb = cb[:ls] + indent + stmt + b'\n' + cb[construct_end:]
+                            else:
+                                cb = cb[:ls] + indent + stmt + b'\n' + cb[construct_end:]
+                        else:
+                            cb = cb[:ls] + indent + stmt + b'\n' + cb[construct_end:]
+                    else:
+                        if is_exit:
+                            dead_end = _find_dead_end_b(cb, construct_end)
+                            if dead_end != -1:
+                                between = cb[construct_end:dead_end].strip()
+                                if between:
+                                    scope_start = cb.rfind(b'\n', 0, dead_end)
+                                    scope_start = scope_start + 1 if scope_start >= 0 else dead_end
+                                    cb = cb[:ls] + indent + stmt + b'\n' + cb[scope_start:]
+                                else:
+                                    cb = cb[:ls] + indent + stmt + b'\n' + cb[construct_end:]
+                            else:
+                                cb = cb[:ls] + indent + stmt + b'\n' + cb[construct_end:]
+                        else:
+                            cb = cb[:ls] + indent + stmt + b'\n' + cb[construct_end:]
+                mod = True
+                break
+
+            body = _body_text_b(cons, cb)
+            before_if = cb[ls:if_node.start_byte].strip()
+            is_inline = len(before_if) > 0
+
+            if is_inline:
+                if_start = if_node.start_byte
+                if_end = if_node.end_byte
+                if value == 'false':
+                    if alt:
+                        at = _alt_text_b(alt, cb)
+                        if at.startswith(b'if'):
+                            cb = cb[:if_start] + at + cb[if_end:]
+                        elif at.startswith(b'{') and at.endswith(b'}'):
+                            inner = at[1:-1].strip()
+                            cb = cb[:if_start] + inner + cb[if_end:]
+                        else:
+                            cb = cb[:if_start] + at + cb[if_end:]
+                    else:
+                        cb = cb[:if_start] + cb[if_end:]
+                elif value == 'true':
+                    cb = cb[:if_start] + body.strip() + cb[if_end:]
+                pos = if_start
+                while pos > 0 and pos < len(cb) and cb[pos-1:pos] == b' ' and cb[pos:pos+1] == b' ':
+                    cb = cb[:pos] + cb[pos+1:]
+                mod = True
+                break
+
+            if value == 'false':
+                if alt:
+                    at = _alt_text_b(alt, cb)
+                    if at.startswith(b'if'):
+                        cb = cb[:ls] + indent + at + b'\n' + cb[construct_end:]
+                    elif at.startswith(b'{') and at.endswith(b'}'):
+                        inner_lines = at[1:-1].split(b'\n')
+                        while inner_lines and inner_lines[0].strip() == b'':
+                            inner_lines.pop(0)
+                        while inner_lines and inner_lines[-1].strip() == b'':
+                            inner_lines.pop()
+                        inner_body = b'\n'.join(l.rstrip() for l in inner_lines)
+                        reindented = _reindent_b(inner_body, indent)
+                        if _VAR_DECL_RE_B.search(inner_body) and not is_kt:
+                            cb = cb[:ls] + indent + b'{\n' + reindented + b'\n' + indent + b'}\n' + cb[construct_end:]
+                        else:
+                            cb = cb[:ls] + reindented + b'\n' + cb[construct_end:]
+                    else:
+                        cb = cb[:ls] + indent + at + b'\n' + cb[construct_end:]
+                else:
+                    cb = cb[:ls] + cb[construct_end:]
+                mod = True
+                break
+
+            elif value == 'true':
+                reindented = _reindent_b(body, indent)
+                keep_braces = bool(_VAR_DECL_RE_B.search(body)) and not is_kt
+                if keep_braces:
+                    rep = indent + b'{\n' + reindented + b'\n' + indent + b'}'
+                else:
+                    rep = reindented
+
+                has_exit = _has_exit_b(body)
+                if has_exit:
+                    dead_end = _find_dead_end_b(cb, construct_end)
+                    if dead_end != -1:
+                        between = cb[construct_end:dead_end].strip()
+                        if between:
+                            scope_start = cb.rfind(b'\n', 0, dead_end)
+                            scope_start = scope_start + 1 if scope_start >= 0 else dead_end
+                            cb = cb[:ls] + rep + b'\n' + cb[scope_start:]
+                        else:
+                            cb = cb[:ls] + rep + b'\n' + cb[construct_end:]
+                    else:
+                        cb = cb[:ls] + rep + b'\n' + cb[construct_end:]
+                else:
+                    cb = cb[:ls] + rep + b'\n' + cb[construct_end:]
+                mod = True
+                break
+
+        if not mod:
+            break
+    return cb
