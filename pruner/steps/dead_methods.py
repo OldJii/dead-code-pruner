@@ -16,7 +16,7 @@ import re
 import time
 
 from .. import lang as _lang
-from ..analysis.project_scan import scan_project
+from ..analysis.project_scan import scan_project, semantic_method_key
 from ..analysis.ref_index import build_ref_index
 from ..analysis.class_hierarchy import enhance_safety, is_framework_class
 from ..analysis.code_edit import (
@@ -51,7 +51,10 @@ def step6_project(root_dir: str, dry_run: bool = False) -> int:
     scan = scan_project(root_dir, progress_interval=500)
     all_files   = scan.all_files
     ref_files   = scan.ref_files
-    all_dead    = scan.dead_methods
+    all_dead    = [
+        dm for dm in scan.dead_methods
+        if semantic_method_key(dm) not in scan.variant_conflicts
+    ]
     ref_index   = dict(scan.ref_index)
 
     void_count = sum(1 for d in all_dead if d['kind'] == 'void')

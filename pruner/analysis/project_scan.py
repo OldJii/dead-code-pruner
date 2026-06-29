@@ -11,7 +11,7 @@ import time
 from collections import defaultdict
 
 from ..lang import _PARSERS, SKIP_DIRS
-from .method_scanner import scan_methods
+from .method_scanner import scan_method_definitions
 from .ref_index import REFERENCE_EXTS, iter_reference_names
 
 
@@ -24,7 +24,7 @@ _IMPL       = re.compile(r'\bclass\s+(\w+)[^{]*\bimplements\s+')
 class ProjectScanResult:
     """Container for all data collected during a unified project scan."""
 
-    __slots__ = ('all_files', 'ref_files', 'dead_methods', 'ref_index',
+    __slots__ = ('all_files', 'ref_files', 'dead_methods', 'variant_conflicts', 'ref_index',
                  'children_map', 'final_classes', 'iface_abstract',
                  'implements', 'elapsed')
 
@@ -32,6 +32,7 @@ class ProjectScanResult:
         self.all_files: list[str]               = []
         self.ref_files: list[str]               = []
         self.dead_methods: list[dict]            = []
+        self.variant_conflicts: set[tuple]       = set()
         self.ref_index: dict[str, set[str]]      = defaultdict(set)
         self.children_map: dict[str, set[str]]   = defaultdict(set)
         self.final_classes: set[str]             = set()
@@ -64,6 +65,7 @@ def scan_project(root_dir: str, *, progress_interval: int = 500) -> ProjectScanR
 
     total = len(result.all_files)
     dead_count = 0
+    method_defs_by_key: dict[tuple, list[dict]] = defaultdict(list)
     print(f"  Unified scan: {total} source files")
 
     # Phase B: single-pass analysis
@@ -84,12 +86,15 @@ def scan_project(root_dir: str, *, progress_interval: int = 500) -> ProjectScanR
 
         content = cb.decode('utf-8', errors='replace')
 
-        # 1) Dead method scan
+        # 1) Method scan
         try:
-            methods = scan_methods(fp, cb, ext)
-            if methods:
-                result.dead_methods.extend(methods)
-                dead_count += len(methods)
+            methods = scan_method_definitions(fp, cb, ext)
+            for method in methods:
+                key = semantic_method_key(method)
+                method_defs_by_key[key].append(method)
+                if method.get('is_dead_candidate'):
+                    result.dead_methods.append(method)
+                    dead_count += 1
         except Exception as e:
             print(f"\n  WARN scan {fp}: {e}", file=sys.stderr)
 
@@ -122,8 +127,25 @@ def scan_project(root_dir: str, *, progress_interval: int = 500) -> ProjectScanR
             if len(name) > 2:
                 result.ref_index[name].add(fp)
 
+    for key, methods in method_defs_by_key.items():
+        candidate_shapes = {(m.get('kind'), m.get('value')) for m in methods if m.get('is_dead_candidate')}
+        has_non_candidate = any(not m.get('is_dead_candidate') for m in methods)
+        has_multiple_shapes = len(candidate_shapes) > 1
+        if len(methods) > 1 and (has_non_candidate or has_multiple_shapes):
+            result.variant_conflicts.add(key)
+
     result.elapsed = time.time() - t0
     print(f"\n  Scan complete: {dead_count} dead methods, "
           f"{len(result.children_map)} class hierarchies  "
           f"({result.elapsed:.1f}s)")
     return result
+
+
+def semantic_method_key(method: dict) -> tuple:
+    """Source-set independent method identity."""
+    return (
+        method.get('package_name'),
+        method.get('class_name'),
+        method.get('name'),
+        method.get('param_count', 0),
+    )

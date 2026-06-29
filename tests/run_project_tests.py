@@ -36,7 +36,13 @@ def run_dir_test(test_name, test_dir, step_fn):
     failed = 0
     details = []
 
-    for fn in sorted(os.listdir(expected_dir)):
+    expected_files = []
+    for dp, _, fns in os.walk(expected_dir):
+        for fn in fns:
+            expected_file = os.path.join(dp, fn)
+            expected_files.append(os.path.relpath(expected_file, expected_dir))
+
+    for fn in sorted(expected_files):
         expected_file = os.path.join(expected_dir, fn)
         work_file = os.path.join(work_dir, fn)
 

@@ -37,6 +37,16 @@ def _find_enclosing_class(node, cb):
     return None, None
 
 
+def _get_package_name(root, cb) -> str | None:
+    for node_type in ('package_declaration', 'package_header'):
+        nodes = find_all(root, node_type)
+        if nodes:
+            raw = txt(nodes[0], cb).strip()
+            raw = raw.replace('package', '', 1).strip()
+            return raw.rstrip(';').strip() or None
+    return None
+
+
 def _get_modifiers(node, cb) -> set[str]:
     """Extract modifier keywords from a method/function declaration."""
     mods = set()
@@ -195,25 +205,24 @@ def _get_return_type(node, cb) -> str:
     return 'other'
 
 
-# ── public API ──────────────────────────────────────────────
+def _scan_method_records(filepath: str, cb: bytes, ext: str, *, include_all: bool) -> list[dict]:
+    """Scan *filepath* and return method records.
 
-def scan_methods(filepath: str, cb: bytes, ext: str) -> list[dict]:
-    """Scan *filepath* and return a list of dead-method info dicts.
-
-    Each dict contains: name, kind, value, class_name, class_type,
-    param_count, safe_to_inline, is_private, is_static, all_mods,
-    decl_start, decl_end, start_byte, end_byte, filepath.
+    When include_all is false, only dead-method candidates are returned.
     """
     _lang._current_ext = ext
     root, _ = parse(cb)
+    package_name = _get_package_name(root, cb)
     methods: list[dict] = []
 
     for node_type in _METHOD_NODE_TYPES:
         for node in find_all(root, node_type):
             mods = _get_modifiers(node, cb)
-            if mods & {'abstract', 'open', 'override', 'native'}:
+            excluded_by_modifier = bool(mods & {'abstract', 'open', 'override', 'native'})
+            if excluded_by_modifier and not include_all:
                 continue
-            if _has_any_annotation(node, cb):
+            has_annotation = _has_any_annotation(node, cb)
+            if has_annotation and not include_all:
                 continue
 
             name = _get_method_name(node, cb)
@@ -243,7 +252,7 @@ def scan_methods(filepath: str, cb: bytes, ext: str) -> list[dict]:
             elif is_void and ret_type in ('void', 'other'):
                 kind = 'void'
 
-            if kind is None:
+            if kind is None and not include_all:
                 continue
 
             start_line = cb[:node.start_byte].count(b'\n')
@@ -270,6 +279,8 @@ def scan_methods(filepath: str, cb: bytes, ext: str) -> list[dict]:
                 'name': name,
                 'kind': kind,
                 'value': value,
+                'is_dead_candidate': kind is not None and not excluded_by_modifier and not has_annotation,
+                'package_name': package_name,
                 'class_name': class_name,
                 'class_type': class_type,
                 'param_count': param_count,
@@ -285,3 +296,20 @@ def scan_methods(filepath: str, cb: bytes, ext: str) -> list[dict]:
             })
 
     return methods
+
+
+# ── public API ──────────────────────────────────────────────
+
+def scan_method_definitions(filepath: str, cb: bytes, ext: str) -> list[dict]:
+    """Scan *filepath* and return all concrete method definitions."""
+    return _scan_method_records(filepath, cb, ext, include_all=True)
+
+
+def scan_methods(filepath: str, cb: bytes, ext: str) -> list[dict]:
+    """Scan *filepath* and return a list of dead-method info dicts.
+
+    Each dict contains: name, kind, value, class_name, class_type,
+    param_count, safe_to_inline, is_private, is_static, all_mods,
+    decl_start, decl_end, start_byte, end_byte, filepath.
+    """
+    return _scan_method_records(filepath, cb, ext, include_all=False)
