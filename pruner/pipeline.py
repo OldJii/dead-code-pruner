@@ -186,7 +186,7 @@ def run_phase_3(target: str, replacements: list, dry_run: bool) -> tuple[int, fl
         total += dead_cnt + cascade_cnt
         print(f"  Round {r}: dead={dead_cnt}, cascade={cascade_cnt}")
 
-        if dead_cnt == 0 or cascade_cnt == 0 or dry_run:
+        if dead_cnt == 0 or dry_run:
             print(f"  ✔ Phase 3 converged after {r} round(s)")
             break
     elapsed = time.time() - t0
