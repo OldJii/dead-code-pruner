@@ -5,12 +5,12 @@ class Case20 {
 
     public void test() {
         // 简单限定
-        boolean a = false;
+        boolean a = SomeController.isTest();
         // 全限定名
-        boolean b = false;
+        boolean b = com.p1.mobile.putong.core.ab.SomeController.isTest();
         // 嵌套包名
-        boolean c = false;
+        boolean c = com.p1.mobile.putong.core.ab.experiment.OnLineController.isOnline();
         // return 语句中的全限定名
-        return false;
+        return com.p1.mobile.putong.core.ab.SomeController.isTest();
     }
 }

@@ -63,10 +63,12 @@ def step5_project(root_dir: str, dry_run: bool = False) -> int:
 
     variant_conflicts = set()
     for key, methods in all_defs_by_key.items():
+        source_sets = {m.get('source_set') for m in methods if m.get('source_set')}
         candidate_shapes = {(m.get('kind'), m.get('value')) for m in methods if m.get('is_dead_candidate')}
         has_non_candidate = any(not m.get('is_dead_candidate') for m in methods)
         has_multiple_shapes = len(candidate_shapes) > 1
-        if len(methods) > 1 and (has_non_candidate or has_multiple_shapes):
+        has_source_set_variants = len(source_sets) > 1
+        if len(methods) > 1 and (has_source_set_variants or has_non_candidate or has_multiple_shapes):
             variant_conflicts.add(key)
     all_methods = [m for m in all_methods if semantic_method_key(m) not in variant_conflicts]
 

@@ -7,6 +7,10 @@ public class Case1_VoidEmpty {
     protected void onDestroy() {
     }
 
+    // Case 1.5: public 空方法 → 应跨文件搜索再决定；这里假设无引用 → 删除
+    public void unusedPublicEmpty() {
+    }
+
     // Case 1.7: 非空方法 → 不应删除
     private void realMethod() {
         System.out.println("hello");

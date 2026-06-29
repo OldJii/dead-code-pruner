@@ -128,10 +128,12 @@ def scan_project(root_dir: str, *, progress_interval: int = 500) -> ProjectScanR
                 result.ref_index[name].add(fp)
 
     for key, methods in method_defs_by_key.items():
+        source_sets = {m.get('source_set') for m in methods if m.get('source_set')}
         candidate_shapes = {(m.get('kind'), m.get('value')) for m in methods if m.get('is_dead_candidate')}
         has_non_candidate = any(not m.get('is_dead_candidate') for m in methods)
         has_multiple_shapes = len(candidate_shapes) > 1
-        if len(methods) > 1 and (has_non_candidate or has_multiple_shapes):
+        has_source_set_variants = len(source_sets) > 1
+        if len(methods) > 1 and (has_source_set_variants or has_non_candidate or has_multiple_shapes):
             result.variant_conflicts.add(key)
 
     result.elapsed = time.time() - t0

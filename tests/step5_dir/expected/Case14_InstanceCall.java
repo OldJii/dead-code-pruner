@@ -9,7 +9,7 @@ class Case14 {
 
     public void test() {
         Case14 obj = new Case14();
-        boolean a = true;
+        boolean a = Case14.isReady();
         boolean b = obj.isReady();
         boolean c = getHelper().isReady();
     }

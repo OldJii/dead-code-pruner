@@ -65,9 +65,7 @@ def step6_project(root_dir: str, dry_run: bool = False) -> int:
     # ── Phase 2: Safety analysis ────────────────────────────
     t_safety = time.time()
     print("  Analyzing class hierarchy for safety promotion...")
-    enhanced = enhance_safety(
-        all_dead, scan.children_map, scan.final_classes,
-        scan.iface_abstract, scan.implements)
+    enhanced = 0
     safe_count = sum(1 for d in all_dead if d['safe_to_inline'])
     print(f"  Promoted {enhanced} leaf/final methods → total safe={safe_count}  "
           f"({time.time()-t_safety:.1f}s)")
@@ -80,12 +78,7 @@ def step6_project(root_dir: str, dry_run: bool = False) -> int:
                   f"{'=' + dm['value'] if dm['value'] else ''}  [{rel}]{safe_tag}")
         return len(all_dead)
 
-    # Pre-check: promote unreferenced public instance methods
     t_pre = time.time()
-    _pre_check_public_methods(
-        all_dead, ref_index,
-        scan.children_map, scan.final_classes,
-        scan.iface_abstract, scan.implements)
     safe_count = sum(1 for d in all_dead if d['safe_to_inline'])
     print(f"  Pre-check complete: total safe={safe_count}  ({time.time()-t_pre:.1f}s)")
 

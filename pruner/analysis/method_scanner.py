@@ -5,6 +5,8 @@ are empty (void) or return a boolean constant, making them candidates for
 inlining or removal.
 """
 
+import os
+
 from ..ast_utils import parse, txt, find_all, is_bool
 from .. import lang as _lang
 
@@ -44,6 +46,14 @@ def _get_package_name(root, cb) -> str | None:
             raw = txt(nodes[0], cb).strip()
             raw = raw.replace('package', '', 1).strip()
             return raw.rstrip(';').strip() or None
+    return None
+
+
+def _get_source_set(filepath: str) -> str | None:
+    parts = os.path.normpath(filepath).split(os.sep)
+    for idx, part in enumerate(parts[:-1]):
+        if part == 'src' and idx + 1 < len(parts):
+            return parts[idx + 1]
     return None
 
 
@@ -238,7 +248,7 @@ def _scan_method_records(filepath: str, cb: bytes, ext: str, *, include_all: boo
 
             is_private = 'private' in mods
             is_static  = 'static' in mods
-            safe_to_inline = is_private or is_static
+            safe_to_inline = is_private
             class_name, class_type = _find_enclosing_class(node, cb)
 
             ret_type  = _get_return_type(node, cb)
@@ -281,6 +291,7 @@ def _scan_method_records(filepath: str, cb: bytes, ext: str, *, include_all: boo
                 'value': value,
                 'is_dead_candidate': kind is not None and not excluded_by_modifier and not has_annotation,
                 'package_name': package_name,
+                'source_set': _get_source_set(filepath),
                 'class_name': class_name,
                 'class_type': class_type,
                 'param_count': param_count,
