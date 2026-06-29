@@ -8,7 +8,7 @@ class Case21 {
         if (!hasPrivilege()
             && freeRemaining() <= 0
             // PayWall二期优化，不再弹购买弹框
-            && !PayController.isPayWallExp()) {
+            && !false) {
             showDialog();
             return false;
         }
@@ -19,7 +19,7 @@ class Case21 {
         if (hasPrivilege()
             || freeRemaining() > 0
             // PayWall二期优化
-            || PayController.isPayWallExp()) {
+            || false) {
             showFeature();
         }
     }
@@ -27,7 +27,7 @@ class Case21 {
     public void test3() {
         // 场景: 中间条件变成 false
         if (conditionA()
-            && PayController.isPayWallExp()
+            && false
             && conditionB()) {
             doWork();
         }

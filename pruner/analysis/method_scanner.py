@@ -248,7 +248,7 @@ def _scan_method_records(filepath: str, cb: bytes, ext: str, *, include_all: boo
 
             is_private = 'private' in mods
             is_static  = 'static' in mods
-            safe_to_inline = is_private
+            safe_to_inline = is_private or is_static
             class_name, class_type = _find_enclosing_class(node, cb)
 
             ret_type  = _get_return_type(node, cb)

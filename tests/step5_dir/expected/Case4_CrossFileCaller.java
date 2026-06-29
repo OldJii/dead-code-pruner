@@ -4,10 +4,10 @@ package com.test;
 class Case4Caller {
 
     public void test() {
-        if (Case3Controller.isBarLoverExp()) {
+        if (false) {
             renderLocal();
         }
-        boolean flag = Case3Controller.showIntroduction() || isOtherCondition();
-        String x = Case3Controller.isBarLoverExp() ? "local" : "intl";
+        boolean flag = false || isOtherCondition();
+        String x = false ? "local" : "intl";
     }
 }

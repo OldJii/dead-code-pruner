@@ -6,15 +6,6 @@ package com.test;
  */
 public class LeafHelper {
 
-  // 应删除：void 空方法，无调用者
-  public void doNothing() {
-  }
-
-  // 应删除：boolean 返回常量，无调用者
-  public boolean isEnabled() {
-    return false;
-  }
-
   // 应保留：boolean 返回常量，但被 CallerFile 调用 → 内联为 false
   public boolean isFeatureOn() {
     return false;

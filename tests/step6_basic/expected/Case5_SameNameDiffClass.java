@@ -2,10 +2,6 @@ package com.test;
 
 public class Case5_SameNameDiffClass {
 
-    // Case 5.2: 调用自己的 init() → 应删除
-    public void setup() {
-    }
-
     // Case 5.3: 调用另一个类的 init() → 不应被删（它不是死方法）
     public void setupOther(OtherClass other) {
         other.init();
@@ -14,11 +10,6 @@ public class Case5_SameNameDiffClass {
     // Case 5.4: 静态调用另一个类 → 不应被删
     public void callStatic() {
         OtherClass.staticInit();
-    }
-
-    // Case 5.6: 使用自己的 check() → 应内联为 false
-    public boolean doCheck() {
-        return false;
     }
 
     // Case 5.7: 使用另一个类的 check() → 不应被替换

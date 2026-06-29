@@ -12,10 +12,10 @@ class Case3Controller {
     }
 
     public void localUse() {
-        if (Case3Controller.isBarLoverExp()) {
+        if (false) {
             doSomething();
         }
-        if (showIntroduction()) {
+        if (false) {
             showUI();
         }
     }

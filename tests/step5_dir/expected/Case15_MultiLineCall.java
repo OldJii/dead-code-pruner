@@ -8,12 +8,10 @@ class Case15 {
     }
 
     public void test() {
-        boolean result = Case15
-            .isMultiLine();
-        if (Case15.
-            isMultiLine()) {
+        boolean result = true;
+        if (true) {
             doWork();
         }
-        boolean simple = Case15.isMultiLine();
+        boolean simple = true;
     }
 }
