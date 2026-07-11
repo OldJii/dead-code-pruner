@@ -9,8 +9,33 @@ Resolves:
 
 from ..ast_utils import parse, txt, find_all, is_bool, replace_node
 
+
+class _SpanNode:
+    """Synthetic node spanning a byte range for multi-child operands
+    (e.g. Dart splits ``foo()`` into identifier + selector)."""
+    __slots__ = ('start_byte', 'end_byte', 'type', 'parent', 'children', 'named_children')
+
+    def __init__(self, start, end):
+        self.start_byte = start
+        self.end_byte = end
+        self.type = '_span'
+        self.parent = None
+        self.children = []
+        self.named_children = []
+
+    def child_by_field_name(self, name):  # noqa: ARG002
+        return None
+
+
 _BINARY_TYPES = ('binary_expression', 'conjunction_expression',
-                 'disjunction_expression', 'infix_expression')
+                 'disjunction_expression', 'infix_expression',
+                 'logical_and_expression', 'logical_or_expression')
+
+_OPERATOR_TYPES = frozenset({
+    '&&', '||', '==', '!=', '+', '-',
+    'logical_and_operator', 'logical_or_operator',
+    'equality_operator',
+})
 
 
 def _get_binary_parts(node, cb):
@@ -20,9 +45,22 @@ def _get_binary_parts(node, cb):
     if left and right and op:
         return left, txt(op, cb), right
     ch = node.children
-    if len(ch) >= 3:
+    if len(ch) < 3:
+        return None, None, None
+    op_idx = None
+    for i, c in enumerate(ch):
+        if c.type in _OPERATOR_TYPES:
+            op_idx = i
+            break
+    if op_idx is None:
         return ch[0], txt(ch[1], cb), ch[2]
-    return None, None, None
+    left_node = ch[0]
+    op_text = txt(ch[op_idx], cb)
+    if op_idx + 1 == len(ch) - 1:
+        right_node = ch[op_idx + 1]
+    else:
+        right_node = _SpanNode(ch[op_idx + 1].start_byte, ch[-1].end_byte)
+    return left_node, op_text, right_node
 
 
 def _find_all_binary(root):
@@ -82,7 +120,14 @@ def step3_compound(cb: bytes) -> bytes:
 
         for t in find_all(root, 'ternary_expression') + find_all(root, 'conditional_expression'):
             cond = t.child_by_field_name('condition')
-            cv   = is_bool(cond, cb) if cond else None
+            if cond is None:
+                cons_node = t.child_by_field_name('consequence')
+                alt_node  = t.child_by_field_name('alternative')
+                for nc in t.named_children:
+                    if nc is not cons_node and nc is not alt_node:
+                        cond = nc
+                        break
+            cv = is_bool(cond, cb) if cond else None
             if not cv:
                 continue
             if _is_cmp_child(cond, cb):

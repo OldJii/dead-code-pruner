@@ -535,3 +535,22 @@ fun case23_1(privilege: Int): String {
         else -> buildDefault(privilege)
     }
 }
+
+// ============================================================
+// Group 24: 本地常量传播 (Step 1b)
+// ============================================================
+
+fun case24_1() {
+    val isIntl = INTL_FLAG
+    if (isIntl) {
+        doIntl()
+    } else {
+        doLocal()
+    }
+}
+
+fun case24_2() {
+    val flag: Boolean = INTL_FLAG
+    val result = if (flag) "intl" else "local"
+    println(result)
+}

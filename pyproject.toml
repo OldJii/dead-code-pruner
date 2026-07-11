@@ -21,7 +21,9 @@ keywords = [
   "android",
   "swift",
   "ios",
-  "typescript",
+  "dart",
+  "flutter",
+  "go",
   "refactoring"
 ]
 classifiers = [
@@ -39,14 +41,9 @@ dependencies = [
   "tree-sitter>=0.22",
   "tree-sitter-java",
   "tree-sitter-kotlin",
-  "tree-sitter-c",
-  "tree-sitter-cpp",
   "tree-sitter-go",
-  "tree-sitter-javascript",
-  "tree-sitter-typescript",
-  "tree-sitter-rust",
   "tree-sitter-swift",
-  "tree-sitter-c-sharp",
+  "tree-sitter-dart",
   "PyYAML>=6.0"
 ]
 

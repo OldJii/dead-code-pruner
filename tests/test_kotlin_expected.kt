@@ -20,7 +20,8 @@ fun case1_4() {
     doIntl()
 }
 
-"intl"
+fun case1_5() { val s = "intl"
+}
 
 fun case1_6(): Boolean { return true }
 
@@ -118,13 +119,11 @@ fun case6_2() {
 
 fun case6_3() {
     throw RuntimeException("error")
-    cleanup()
 }
 
 fun case6_5() {
     for (i in 0 until 10) {
         break
-        processItem(i)
     }
 }
 
@@ -147,8 +146,7 @@ fun case7_3(): Boolean {
 // ============================================================
 
 fun case8_1() {
-    selectedIdx =
-      selectedIdx
+    selectedIdx = selectedIdx
     selectedIdx = selectedIdx.coerceAtLeast(0)
 }
 
@@ -377,19 +375,17 @@ fun case21_2() {
 }
 
 fun case21_3() {
-    selectedIdx =
-      selectedIdx
+    selectedIdx = selectedIdx
     selectedIdx = selectedIdx.coerceAtLeast(0)
 }
 
 fun case21_4() {
-    selectedIdx =
-      0
+    selectedIdx = 0
     selectedIdx = selectedIdx.coerceAtLeast(0)
 }
 
 fun case21_5() {
-    "intl"
+    val x = "intl"
     println(x)
 }
 
@@ -435,8 +431,21 @@ fun case22_4(): Boolean {
 
 fun case23_1(privilege: Int): String {
     return when (privilege) {
-        buildIntl(privilege)
+        1 -> buildIntl(privilege)
         2 -> buildUndo(privilege)
         else -> buildDefault(privilege)
     }
+}
+
+// ============================================================
+// Group 24: 本地常量传播 (Step 1b)
+// ============================================================
+
+fun case24_1() {
+    doIntl()
+}
+
+fun case24_2() {
+    val result = "intl"
+    println(result)
 }

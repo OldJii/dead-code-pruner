@@ -152,6 +152,24 @@ def _find_dead_end_b(cb, start_pos):
     return -1
 
 
+def _replace_and_trim_dead(cb, ls, rep, construct_end, exit_body):
+    """Replace the if-construct at [ls..construct_end) with *rep*.
+
+    When *exit_body* ends with an unconditional exit (return / throw / etc.),
+    all code between *construct_end* and the enclosing scope boundary is dead
+    and gets removed automatically.
+    """
+    if _has_exit_b(exit_body):
+        dead_end = _find_dead_end_b(cb, construct_end)
+        if dead_end != -1:
+            between = cb[construct_end:dead_end].strip()
+            if between:
+                scope_start = cb.rfind(b'\n', 0, dead_end)
+                scope_start = scope_start + 1 if scope_start >= 0 else dead_end
+                return cb[:ls] + rep + b'\n' + cb[scope_start:]
+    return cb[:ls] + rep + b'\n' + cb[construct_end:]
+
+
 def _is_else_if_b(if_node, cb):
     before_start = if_node.start_byte
     ls = cb.rfind(b'\n', 0, before_start)
@@ -219,6 +237,25 @@ def step4_if_blocks(cb: bytes, is_kt: bool = False) -> bytes:
 
             if not _is_block(cons):
                 stmt = cb[cons.start_byte:cons.end_byte].strip()
+                before_if_nb = cb[ls:if_node.start_byte].strip()
+                is_inline_nb = len(before_if_nb) > 0
+
+                if is_inline_nb:
+                    if_start = if_node.start_byte
+                    if_end = if_node.end_byte
+                    if value == 'false':
+                        if alt:
+                            at = _alt_text_b(alt, cb)
+                            cb = cb[:if_start] + at + cb[if_end:]
+                        else:
+                            cb = cb[:if_start] + cb[if_end:]
+                    elif value == 'true':
+                        cb = cb[:if_start] + stmt + cb[if_end:]
+                    pos = if_start
+                    while pos > 0 and pos < len(cb) and cb[pos-1:pos] == b' ' and cb[pos:pos+1] == b' ':
+                        cb = cb[:pos] + cb[pos+1:]
+                    mod = True
+                    break
 
                 if value == 'false':
                     if alt:
@@ -231,45 +268,15 @@ def step4_if_blocks(cb: bytes, is_kt: bool = False) -> bytes:
                                 inner_lines.pop()
                             inner_body = b'\n'.join(l.rstrip() for l in inner_lines)
                             reindented = _reindent_b(inner_body, indent)
-                            cb = cb[:ls] + reindented + b'\n' + cb[construct_end:]
+                            cb = _replace_and_trim_dead(cb, ls, reindented, construct_end, inner_body)
                         elif at.startswith(b'if'):
                             cb = cb[:ls] + indent + at + b'\n' + cb[construct_end:]
                         else:
-                            cb = cb[:ls] + indent + at + b'\n' + cb[construct_end:]
+                            cb = _replace_and_trim_dead(cb, ls, indent + at, construct_end, at)
                     else:
                         cb = cb[:ls] + cb[construct_end:]
                 elif value == 'true':
-                    is_exit = bool(re.match(rb'^(return\b|throw\b|panic\s*\(|break\b|continue\b)', stmt))
-                    if alt:
-                        if is_exit:
-                            dead_end = _find_dead_end_b(cb, construct_end)
-                            if dead_end != -1:
-                                between = cb[construct_end:dead_end].strip()
-                                if between:
-                                    scope_start = cb.rfind(b'\n', 0, dead_end)
-                                    scope_start = scope_start + 1 if scope_start >= 0 else dead_end
-                                    cb = cb[:ls] + indent + stmt + b'\n' + cb[scope_start:]
-                                else:
-                                    cb = cb[:ls] + indent + stmt + b'\n' + cb[construct_end:]
-                            else:
-                                cb = cb[:ls] + indent + stmt + b'\n' + cb[construct_end:]
-                        else:
-                            cb = cb[:ls] + indent + stmt + b'\n' + cb[construct_end:]
-                    else:
-                        if is_exit:
-                            dead_end = _find_dead_end_b(cb, construct_end)
-                            if dead_end != -1:
-                                between = cb[construct_end:dead_end].strip()
-                                if between:
-                                    scope_start = cb.rfind(b'\n', 0, dead_end)
-                                    scope_start = scope_start + 1 if scope_start >= 0 else dead_end
-                                    cb = cb[:ls] + indent + stmt + b'\n' + cb[scope_start:]
-                                else:
-                                    cb = cb[:ls] + indent + stmt + b'\n' + cb[construct_end:]
-                            else:
-                                cb = cb[:ls] + indent + stmt + b'\n' + cb[construct_end:]
-                        else:
-                            cb = cb[:ls] + indent + stmt + b'\n' + cb[construct_end:]
+                    cb = _replace_and_trim_dead(cb, ls, indent + stmt, construct_end, stmt)
                 mod = True
                 break
 
@@ -314,11 +321,12 @@ def step4_if_blocks(cb: bytes, is_kt: bool = False) -> bytes:
                         inner_body = b'\n'.join(l.rstrip() for l in inner_lines)
                         reindented = _reindent_b(inner_body, indent)
                         if _VAR_DECL_RE_B.search(inner_body) and not is_kt:
-                            cb = cb[:ls] + indent + b'{\n' + reindented + b'\n' + indent + b'}\n' + cb[construct_end:]
+                            rep = indent + b'{\n' + reindented + b'\n' + indent + b'}'
                         else:
-                            cb = cb[:ls] + reindented + b'\n' + cb[construct_end:]
+                            rep = reindented
+                        cb = _replace_and_trim_dead(cb, ls, rep, construct_end, inner_body)
                     else:
-                        cb = cb[:ls] + indent + at + b'\n' + cb[construct_end:]
+                        cb = _replace_and_trim_dead(cb, ls, indent + at, construct_end, at)
                 else:
                     cb = cb[:ls] + cb[construct_end:]
                 mod = True
@@ -331,22 +339,7 @@ def step4_if_blocks(cb: bytes, is_kt: bool = False) -> bytes:
                     rep = indent + b'{\n' + reindented + b'\n' + indent + b'}'
                 else:
                     rep = reindented
-
-                has_exit = _has_exit_b(body)
-                if has_exit:
-                    dead_end = _find_dead_end_b(cb, construct_end)
-                    if dead_end != -1:
-                        between = cb[construct_end:dead_end].strip()
-                        if between:
-                            scope_start = cb.rfind(b'\n', 0, dead_end)
-                            scope_start = scope_start + 1 if scope_start >= 0 else dead_end
-                            cb = cb[:ls] + rep + b'\n' + cb[scope_start:]
-                        else:
-                            cb = cb[:ls] + rep + b'\n' + cb[construct_end:]
-                    else:
-                        cb = cb[:ls] + rep + b'\n' + cb[construct_end:]
-                else:
-                    cb = cb[:ls] + rep + b'\n' + cb[construct_end:]
+                cb = _replace_and_trim_dead(cb, ls, rep, construct_end, body)
                 mod = True
                 break
 

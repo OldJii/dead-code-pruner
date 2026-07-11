@@ -23,10 +23,24 @@ def has_dynamic_symbol_ref(content: str, method_name: str) -> bool:
     return any(re.search(p, content) for p in patterns)
 
 
+def _line_of_offset(content: str, offset: int) -> int:
+    """Return the 0-based line number for byte offset *offset*."""
+    return content.count('\n', 0, offset)
+
+
 def replace_calls_in_content(content: str, method_name: str, value: str,
                              class_name: str | None = None,
-                             same_file: bool = True) -> tuple[str, int]:
-    """Replace ``method()`` / ``Class.method()`` with *value*. Returns ``(new_content, count)``."""
+                             same_file: bool = True,
+                             class_lines: tuple[int, int] | None = None,
+                             ) -> tuple[str, int]:
+    """Replace ``method()`` / ``Class.method()`` with *value*.
+
+    When *class_lines* ``(start, end)`` is provided and *same_file* is
+    ``True``, bare (unqualified) call replacements are restricted to lines
+    within the enclosing class scope, preventing cross-class mis-replacement
+    in files that contain multiple classes with same-name methods.
+    Qualified calls (``ClassName.method()``) are always replaced file-wide.
+    """
     count = 0
     if class_name:
         pat = re.compile(
@@ -54,9 +68,15 @@ def replace_calls_in_content(content: str, method_name: str, value: str,
                 continue
             if m.start() > 0 and content[m.start() - 1] == '.':
                 continue
+            if class_lines is not None:
+                line_no = _line_of_offset(content, m.start())
+                if not (class_lines[0] <= line_no <= class_lines[1]):
+                    continue
             line_start = content.rfind('\n', 0, m.start()) + 1
             before = content[line_start:m.start()].strip().split()
             if before and before[-1] in type_kws:
+                continue
+            if before and re.match(r'^[A-Z]\w*$', before[-1]):
                 continue
             new_content += content[last:m.start()] + value
             last = m.end()
@@ -69,24 +89,50 @@ def replace_calls_in_content(content: str, method_name: str, value: str,
 
 def remove_void_calls_in_content(content: str, method_name: str,
                                  class_name: str | None = None,
-                                 same_file: bool = True) -> tuple[str, int]:
-    """Remove standalone void method calls. Returns ``(new_content, count)``."""
+                                 same_file: bool = True,
+                                 class_lines: tuple[int, int] | None = None,
+                                 ) -> tuple[str, int]:
+    """Remove standalone void method calls.
+
+    When *class_lines* ``(start, end)`` is provided and *same_file* is
+    ``True``, bare (unqualified) calls are only removed within the
+    enclosing class scope.  Qualified calls (``this.method()``,
+    ``ClassName.method()``) are always removed file-wide.
+    """
     lines = content.split('\n')
     new_lines = []
     count = 0
-    if same_file:
-        qualifiers = [r'', r'this\s*\.\s*']
-        if class_name:
-            qualifiers.append(re.escape(class_name) + r'\s*\.\s*')
-    else:
-        qualifiers = [re.escape(class_name) + r'\s*\.\s*'] if class_name else [r'']
-    qual_pat = '|'.join(f'(?:{q})' for q in qualifiers)
-    pat = re.compile(
-        r'^\s*(?:' + qual_pat + r')' + re.escape(method_name) + r'\s*\(\s*\)\s*;?\s*$')
-    for line in lines:
-        if pat.match(line.rstrip()):
+
+    bare_pat = re.compile(
+        r'^\s*' + re.escape(method_name) + r'\s*\(\s*\)\s*;?\s*$')
+    this_pat = re.compile(
+        r'^\s*this\s*\.\s*' + re.escape(method_name) + r'\s*\(\s*\)\s*;?\s*$')
+    cls_pat = (re.compile(
+        r'^\s*' + re.escape(class_name) + r'\s*\.\s*'
+        + re.escape(method_name) + r'\s*\(\s*\)\s*;?\s*$')
+        if class_name else None)
+
+    for i, line in enumerate(lines):
+        stripped = line.rstrip()
+        if is_in_comment_or_string(line, line.find(method_name)) if method_name in line else False:
+            new_lines.append(line)
+            continue
+        if same_file and this_pat.match(stripped):
             count += 1
             continue
+        if cls_pat and cls_pat.match(stripped):
+            count += 1
+            continue
+        if same_file and bare_pat.match(stripped):
+            if class_lines is not None and not (class_lines[0] <= i <= class_lines[1]):
+                new_lines.append(line)
+                continue
+            count += 1
+            continue
+        if not same_file and not class_name:
+            if bare_pat.match(stripped):
+                count += 1
+                continue
         new_lines.append(line)
     return '\n'.join(new_lines), count
 
@@ -95,6 +141,19 @@ def clean_standalone_booleans(content: str) -> str:
     """Remove standalone ``true;`` / ``false;`` statements."""
     lines = content.split('\n')
     return '\n'.join(l for l in lines if l.strip() not in ('true;', 'false;'))
+
+
+def clean_standalone_constants(content: str, value: str) -> str:
+    """Remove standalone constant expression statements left after inlining.
+
+    After replacing ``method()`` with *value*, standalone usages like
+    ``method();`` become ``value;`` which is a useless expression statement.
+    Only removes the semicolon-terminated form (``value;``) to avoid
+    breaking Kotlin/Dart expression values or multi-line argument lists.
+    """
+    target_with_semi = value.rstrip(';') + ';'
+    return '\n'.join(l for l in content.split('\n')
+                     if l.strip() != target_with_semi)
 
 
 def delete_line_ranges(content: str, ranges: list[tuple[int, int]]) -> tuple[str, int]:
@@ -181,16 +240,84 @@ def _has_call_site(content: str, method_name: str) -> bool:
         return True
 
 
-def has_cross_file_refs(dm: dict, ref_index: dict, src_abs: str) -> bool:
+_KOTLIN_PROPERTY_PREFIXES = ('is', 'get', 'has')
+
+
+def _kotlin_property_name(method_name: str) -> str | None:
+    """Derive the Kotlin property name from a Java getter.
+
+    ``isEnabled`` → ``isEnabled`` (``is`` prefix kept for boolean).
+    ``getCount``  → ``count``.
+    ``hasItems``  → ``hasItems`` (``has`` kept — not a standard property).
+    Returns *None* when the name does not match a getter pattern.
+    """
+    if method_name.startswith('is') and len(method_name) > 2 and method_name[2].isupper():
+        return method_name
+    if method_name.startswith('get') and len(method_name) > 3 and method_name[3].isupper():
+        return method_name[3].lower() + method_name[4:]
+    if method_name.startswith('has') and len(method_name) > 3 and method_name[3].isupper():
+        return method_name
+    return None
+
+
+def _has_kotlin_property_ref(content: str, method_name: str) -> bool:
+    """Check for Kotlin-style property access of a Java getter.
+
+    Searches for ``.propertyName`` where *propertyName* is either the
+    original method name (``is*``, ``has*``) or the decapitalised
+    ``get*`` form.
+    """
+    prop = _kotlin_property_name(method_name)
+    if not prop:
+        return False
+    dot_prop = '.' + prop
+    start = 0
+    while True:
+        idx = content.find(dot_prop, start)
+        if idx == -1:
+            return False
+        after = idx + len(dot_prop)
+        if after < len(content) and (content[after].isalnum() or content[after] == '_'):
+            start = after
+            continue
+        if is_in_comment_or_string(content, idx):
+            start = after
+            continue
+        return True
+
+
+def verify_no_dangling_calls(content: str, method_names: set[str]) -> list[str]:
+    """Return names from *method_names* that still appear as call sites in *content*."""
+    dangling = []
+    for name in method_names:
+        pat = re.compile(r'(?<!\w)' + re.escape(name) + r'\s*\(\s*\)')
+        for m in pat.finditer(content):
+            line_start = content.rfind('\n', 0, m.start()) + 1
+            line = content[line_start:content.find('\n', m.start())]
+            stripped = line.strip()
+            if stripped.startswith('//') or stripped.startswith('/*'):
+                continue
+            if not is_in_comment_or_string(content, m.start()):
+                dangling.append(name)
+                break
+    return dangling
+
+
+def has_cross_file_refs(dm: dict, ref_index: dict, src_abs: str,
+                        children_map: dict | None = None,
+                        iface_abstract: set | None = None) -> bool:
     """Return ``True`` if method *dm* has cross-file references.
 
     Detection strategies (applied in order):
       1. Qualified:  ``ClassName.methodName`` in the file.
       2. Contextual: both ``ClassName`` and ``methodName(`` in the file.
       3. Instance:   bare ``methodName(`` **call** for non-private, non-static
-         methods.  Instance methods can be called via any variable reference
-         (e.g. ``obj.field.method()``), so the class name may never appear
-         in the calling file.  Definitions in other files are excluded.
+         methods.  To reduce false positives, when *children_map* is
+         provided and the declaring class has no known children/implementors,
+         files that never mention the class name are skipped (bare calls
+         there cannot target this class without inheritance).
+      4. Kotlin property: ``.isXxx`` / ``.xxx`` (for ``getXxx``) property
+         access without parentheses — Java/Kotlin interop.
     """
     name = dm['name']
     cls  = dm.get('class_name', '')
@@ -198,7 +325,20 @@ def has_cross_file_refs(dm: dict, ref_index: dict, src_abs: str) -> bool:
     is_static  = dm.get('is_static', False)
     is_instance = not is_private and not is_static
 
-    for rf in ref_index.get(name, set()):
+    has_hierarchy = False
+    if is_instance and cls and children_map:
+        has_hierarchy = bool(children_map.get(cls))
+    if is_instance and cls and iface_abstract and cls in iface_abstract:
+        has_hierarchy = True
+
+    prop_name = _kotlin_property_name(name)
+    check_property = prop_name is not None
+
+    ref_files = set(ref_index.get(name, set()))
+    if check_property and prop_name != name:
+        ref_files |= ref_index.get(prop_name, set())
+
+    for rf in ref_files:
         if os.path.abspath(rf) == src_abs:
             continue
         try:
@@ -215,6 +355,13 @@ def has_cross_file_refs(dm: dict, ref_index: dict, src_abs: str) -> bool:
             return True
         if cls and cls in rc and name + '(' in rc:
             return True
-        if is_instance and _has_call_site(rc, name):
+        if is_instance:
+            if has_hierarchy:
+                if _has_call_site(rc, name):
+                    return True
+            else:
+                if cls and cls in rc and _has_call_site(rc, name):
+                    return True
+        if check_property and _has_kotlin_property_ref(rc, name):
             return True
     return False

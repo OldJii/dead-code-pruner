@@ -7,6 +7,7 @@ import os
 import re
 from collections import defaultdict
 from ..lang import _PARSERS, SKIP_DIRS
+from .. import ui
 
 
 REFERENCE_EXTS = frozenset({
@@ -18,6 +19,7 @@ _REF_PAT = re.compile(r'::(\w+)\b')
 _SWIFT_SELECTOR_PAT = re.compile(
     r'#selector\s*\(\s*(?:getter:\s*|setter:\s*)?(?:(?:\w+)\.)?(\w+)\b')
 _IB_SELECTOR_PAT = re.compile(r'\bselector="([A-Za-z_]\w*)')
+_DOT_PROPERTY_PAT = re.compile(r'\.([a-z]\w*)\b(?!\s*\()')
 
 
 def collect_files(root_dir: str, *, include_reference_files: bool = False) -> list[str]:
@@ -34,7 +36,11 @@ def collect_files(root_dir: str, *, include_reference_files: bool = False) -> li
 
 
 def iter_reference_names(content: str):
-    """Yield symbol names that may represent call sites or dynamic references."""
+    """Yield symbol names that may represent call sites or dynamic references.
+
+    Includes dot-property access patterns (e.g. ``.isEnabled``) to
+    capture Kotlin-style property access of Java getters.
+    """
     for m in _CALL_PAT.finditer(content):
         yield m.group(1)
     for m in _REF_PAT.finditer(content):
@@ -42,6 +48,8 @@ def iter_reference_names(content: str):
     for m in _SWIFT_SELECTOR_PAT.finditer(content):
         yield m.group(1)
     for m in _IB_SELECTOR_PAT.finditer(content):
+        yield m.group(1)
+    for m in _DOT_PROPERTY_PAT.finditer(content):
         yield m.group(1)
 
 
@@ -51,7 +59,7 @@ def build_ref_index(all_files: list[str], *, quiet: bool = False) -> dict[str, s
     total = len(all_files)
     for idx, fp in enumerate(all_files):
         if not quiet and ((idx + 1) % 1000 == 0 or idx + 1 == total):
-            print(f"\r    Building ref index... {idx+1}/{total}", end='', flush=True)
+            ui.progress(idx + 1, total, "Building ref index", indent=4)
         try:
             with open(fp, 'r', encoding='utf-8', errors='ignore') as f:
                 content = f.read()
@@ -61,37 +69,107 @@ def build_ref_index(all_files: list[str], *, quiet: bool = False) -> dict[str, s
             if len(name) > 2:
                 index[name].add(fp)
     if not quiet and total > 100:
-        print()
+        ui.progress_done()
     return index
 
 
 def is_in_comment_or_string(content: str, pos: int) -> bool:
-    """Return ``True`` if *pos* falls inside a comment or string literal."""
+    """Return ``True`` if *pos* falls inside a comment or string literal.
+
+    Handles string interpolation for Kotlin/Dart (``${expr}``) and
+    Swift (``\\(expr)``).  Code inside interpolation braces/parens is
+    treated as normal code, not as part of the enclosing string.
+    """
     i = 0
-    in_lc = in_bc = in_str = False
-    sc = None
+    in_lc = in_bc = False
+    str_stack: list[str] = []
+    interp_depth: list[int] = []
+
     while i < pos:
         c = content[i]
+
         if in_lc:
             if c == '\n':
                 in_lc = False
-        elif in_bc:
+            i += 1
+            continue
+
+        if in_bc:
             if c == '*' and i + 1 < len(content) and content[i + 1] == '/':
                 in_bc = False
+                i += 2
+                continue
+            i += 1
+            continue
+
+        if interp_depth and interp_depth[-1] > 0:
+            if c == '{':
+                interp_depth[-1] += 1
+            elif c == '}':
+                interp_depth[-1] -= 1
+                if interp_depth[-1] == 0:
+                    interp_depth.pop()
+            elif c == '(' and str_stack and str_stack[-1] == 'swift_interp':
+                interp_depth[-1] += 1
+            elif c == ')' and str_stack and str_stack[-1] == 'swift_interp':
+                interp_depth[-1] -= 1
+                if interp_depth[-1] == 0:
+                    interp_depth.pop()
+                    str_stack.pop()
+            elif c == '/' and i + 1 < len(content):
+                if content[i + 1] == '/':
+                    in_lc = True
+                    i += 1
+                elif content[i + 1] == '*':
+                    in_bc = True
+                    i += 2
+                    continue
+            elif c in ('"', "'"):
+                str_stack.append(c)
+            i += 1
+            continue
+
+        if str_stack:
+            sc = str_stack[-1]
+            if sc == 'swift_interp':
                 i += 1
-        elif in_str:
+                continue
             if c == '\\':
-                i += 1
-            elif c == sc:
-                in_str = False
-        elif c == '/' and i + 1 < len(content):
+                if sc == '"' and i + 1 < len(content) and content[i + 1] == '(':
+                    str_stack.append('swift_interp')
+                    interp_depth.append(1)
+                    i += 2
+                    continue
+                i += 2
+                continue
+            if c == '$' and sc == '"' and i + 1 < len(content) and content[i + 1] == '{':
+                interp_depth.append(1)
+                i += 2
+                continue
+            if c == sc:
+                str_stack.pop()
+            i += 1
+            continue
+
+        if c == '/' and i + 1 < len(content):
             if content[i + 1] == '/':
                 in_lc = True
-            elif content[i + 1] == '*':
+                i += 2
+                continue
+            if content[i + 1] == '*':
                 in_bc = True
-                i += 1
-        elif c in ('"', "'"):
-            in_str = True
-            sc = c
+                i += 2
+                continue
+
+        if c in ('"', "'"):
+            str_stack.append(c)
+
         i += 1
-    return in_lc or in_bc or in_str
+
+    if in_lc or in_bc:
+        return True
+    if str_stack and not interp_depth:
+        return True
+    if interp_depth:
+        return False
+    return bool(str_stack)

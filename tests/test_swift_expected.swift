@@ -306,8 +306,7 @@ func case18_4() {
     for i in 0..<10 {
         process(i)
     }
-    let result = false
-    _ = result
+    _ = false
 }
 
 // ============================================================

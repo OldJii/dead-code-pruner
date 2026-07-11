@@ -4,11 +4,6 @@ Methods in leaf classes (classes with no subclasses) or ``final`` classes
 can be treated as effectively private for dead-code purposes.
 """
 
-import re
-from collections import defaultdict
-
-_FRAMEWORK_PREFIXES = ('Abstract', 'Abs', 'Base', 'I')
-
 
 def is_framework_class(class_name: str | None) -> bool:
     """Return ``True`` if *class_name* looks like a framework base class."""
@@ -23,35 +18,6 @@ def is_framework_class(class_name: str | None) -> bool:
     if class_name.startswith('I') and len(class_name) > 1 and class_name[1].isupper():
         return True
     return False
-
-
-def build_class_hierarchy(all_files: list[str]):
-    """Return ``(children_map, final_classes, iface_abstract, implements)``."""
-    children_map: dict[str, set[str]] = defaultdict(set)
-    final_classes: set[str]     = set()
-    iface_abstract: set[str]    = set()
-    implements: set[str]        = set()
-    extends_pat = re.compile(r'\b(?:final\s+)?(?:class|object)\s+(\w+)\s*(?::|extends)\s+(\w+)')
-    final_pat   = re.compile(r'\bfinal\s+class\s+(\w+)')
-    iface_pat   = re.compile(r'\b(?:interface|protocol|abstract\s+class)\s+(\w+)')
-    impl_pat    = re.compile(r'\bclass\s+(\w+)[^{]*\bimplements\s+')
-
-    for fp in all_files:
-        try:
-            with open(fp, 'r', encoding='utf-8', errors='ignore') as f:
-                content = f.read()
-        except Exception:
-            continue
-        for m in extends_pat.finditer(content):
-            children_map[m.group(2)].add(m.group(1))
-        for m in final_pat.finditer(content):
-            final_classes.add(m.group(1))
-        for m in iface_pat.finditer(content):
-            iface_abstract.add(m.group(1))
-        for m in impl_pat.finditer(content):
-            implements.add(m.group(1))
-
-    return children_map, final_classes, iface_abstract, implements
 
 
 def enhance_safety(all_dead: list[dict], children_map, final_classes,

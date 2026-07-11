@@ -54,11 +54,54 @@ def _kt_find_assignment_if(pat, code: str):
         offset = m.end()
 
 
+def _parse_expr_end(code, pos):
+    """Parse an expression starting at *pos*, respecting braces/parens/strings.
+
+    Returns ``(text, end_pos)`` where *end_pos* is the first unconsumed
+    character.  Stops at a newline, semicolon, or an unbalanced ``}``
+    (which belongs to the enclosing scope).
+    """
+    n = len(code)
+    brace = paren = 0
+    i = pos
+    in_str = False
+    while i < n:
+        c = code[i]
+        if c == '\\' and in_str:
+            i += 2
+            continue
+        if c == '"':
+            in_str = not in_str
+            i += 1
+            continue
+        if in_str:
+            i += 1
+            continue
+        if c == '{':
+            brace += 1
+        elif c == '}':
+            if brace > 0:
+                brace -= 1
+            else:
+                break
+        elif c == '(':
+            paren += 1
+        elif c == ')':
+            if paren > 0:
+                paren -= 1
+        elif c == '\n' and brace == 0 and paren == 0:
+            break
+        elif c == ';' and brace == 0 and paren == 0:
+            break
+        i += 1
+    return code[pos:i].strip(), i
+
+
 def kotlin_if_expr(cb: bytes) -> bytes:
     """Resolve Kotlin if-expressions with constant conditions."""
     code = cb.decode('utf-8', errors='replace')
     pat1 = re.compile(r'(return\s+)if\s*\(\s*(true|false)\s*\)\s*\{')
-    pat2 = re.compile(r'if\s*\(\s*(true|false)\s*\)\s+(.+?)\s+else\s+(.+?)([\n;]|$)')
+    pat2_head = re.compile(r'if\s*\(\s*(true|false)\s*\)\s+(.+?)\s+else\s+')
     changed = True
     safety = 0
     while changed and safety < 200:
@@ -102,18 +145,7 @@ def kotlin_if_expr(cb: bytes) -> bytes:
                     else_text = code[ek + 1:k - 1].strip()
                     else_end = k
                 else:
-                    paren_d = 0
-                    k = ek
-                    while k < n:
-                        if code[k] == '(': paren_d += 1
-                        elif code[k] == ')':
-                            paren_d -= 1
-                            if paren_d < 0: paren_d = 0
-                        elif code[k] == '\n' and paren_d == 0: break
-                        elif code[k] == ';' and paren_d == 0: break
-                        k += 1
-                    else_text = code[ek:k].strip()
-                    else_end = k
+                    else_text, else_end = _parse_expr_end(code, ek)
 
                 result = body_text if value == 'true' else else_text
                 indent_ws = ''
@@ -129,16 +161,17 @@ def kotlin_if_expr(cb: bytes) -> bytes:
                 changed = True
                 continue
 
-        found2 = _kt_find_assignment_if(pat2, code)
+        found2 = _kt_find_assignment_if(pat2_head, code)
         if found2:
             m2, ls, prev_line, prefix_stripped = found2
             value = m2.group(1)
             a_expr = m2.group(2).strip()
-            b_expr = m2.group(3).strip()
-            terminator = m2.group(4)
+            b_expr, expr_end = _parse_else_expr_after(code, m2.end())
+
             trail = ''
-            if terminator == ';':
+            if expr_end < len(code) and code[expr_end] == ';':
                 trail = ';'
+                expr_end += 1
             if b_expr.endswith(';'):
                 b_expr = b_expr[:-1]
                 trail = ';'
@@ -147,18 +180,22 @@ def kotlin_if_expr(cb: bytes) -> bytes:
                 trail = ';'
             result = a_expr if value == 'true' else b_expr
 
+            le = expr_end
+            while le < len(code) and code[le] in ' \t':
+                le += 1
+            if le < len(code) and code[le] == '\n':
+                le += 1
+
             if prev_line.endswith('=') and not prefix_stripped:
                 prev_le = ls - 1
                 prev_ls2 = code.rfind('\n', 0, prev_le)
                 prev_ls2 = prev_ls2 + 1 if prev_ls2 >= 0 else 0
-                le = m2.end()
                 after = code[le:]
                 nl = '\n' if not after.startswith('\n') else ''
                 code = code[:prev_ls2] + prev_line + ' ' + result + trail + nl + code[le:]
                 changed = True
                 continue
 
-            le = m2.end()
             after = code[le:]
             nl = '\n' if not after.startswith('\n') else ''
             code = code[:m2.start()] + result + trail + nl + code[le:]
@@ -166,3 +203,8 @@ def kotlin_if_expr(cb: bytes) -> bytes:
             continue
 
     return code.encode('utf-8')
+
+
+def _parse_else_expr_after(code, pos):
+    """Wrapper around _parse_expr_end for the else-branch of an assignment if."""
+    return _parse_expr_end(code, pos)

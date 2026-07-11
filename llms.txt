@@ -2,7 +2,7 @@
 
 > Conservative multi-language dead-code elimination for feature-flag cleanup, boolean constant folding, and static-analysis-driven source cleanup.
 
-dead-code-pruner uses tree-sitter to replace permanently true/false feature flags with literals, simplify boolean expressions, eliminate dead if-branches, inline constant-return methods, and remove safe dead method definitions in a 3-phase iterative pipeline until convergence. It targets dead code cleanup for Java, Kotlin, Android, Swift, iOS, TypeScript, JavaScript, Go, Rust, C, C++, and C# projects while preserving dynamic framework entry points.
+dead-code-pruner uses tree-sitter to replace permanently true/false feature flags with literals, simplify boolean expressions, eliminate dead if-branches, inline constant-return methods, and remove safe dead method definitions in a 3-phase iterative pipeline until convergence. It targets dead code cleanup for Java, Kotlin (Android / JVM server), Go server, Swift iOS, and Dart/Flutter projects while preserving dynamic framework entry points.
 
 ## Documentation
 
@@ -11,9 +11,9 @@ dead-code-pruner uses tree-sitter to replace permanently true/false feature flag
 
 ## Pipeline
 
-**Phase 1** — Constant folding + boolean simplification (steps 1–4, loops until stable)
-**Phase 2** — Constant-return method inlining + cascade simplification
-**Phase 3** — Dead method cleanup + cascade simplification
+**Phase 1** — Constant folding + local propagation + boolean simplification + unreachable code removal (steps 1–4, loops until stable)
+**Phase 2** — Constant-return method inlining (boolean + non-boolean) + cascade simplification
+**Phase 3** — Dead method cleanup + cascade simplification + empty class/file removal
 
 ## Quick start
 
@@ -26,12 +26,12 @@ python3 -m pruner /path/to/project
 
 ## Key facts
 
-- **Languages**: Java, Kotlin, Go, C, C++, JS, TS, Rust, Swift, C# (extensible via tree-sitter)
+- **Languages**: Java, Kotlin, Go, Swift, Dart (5 ecosystems)
 - **Engine**: tree-sitter AST
 - **Dependencies**: Python 3.10+, tree-sitter grammars, PyYAML
-- **Safety**: annotation-aware, chain-call aware, inheritance-aware, comment/string safe
+- **Safety**: annotation-aware, chain-call aware, inheritance-aware, comment/string safe, Kotlin property access safe
 - **License**: MIT
 
 ## Search phrases
 
-dead-code-pruner, dead code eliminator, dead code cleanup tool, tree-sitter static analysis, feature flag cleanup, boolean constant folding, Android dead code cleanup, Java Kotlin dead code removal, Swift iOS dead code cleanup, TypeScript dead code cleanup.
+dead-code-pruner, dead code eliminator, dead code cleanup tool, tree-sitter static analysis, feature flag cleanup, boolean constant folding, Android dead code cleanup, Java Kotlin dead code removal, Swift iOS dead code cleanup, Go server dead code, Dart Flutter dead code cleanup, refactoring automation.

@@ -2,13 +2,15 @@
 
 Uses tree-sitter to parse source files and identify methods whose bodies
 are empty (void) or return a boolean constant, making them candidates for
-inlining or removal.
+inlining or removal.  Language adapters are consulted for entry-point
+detection and visibility-based safety analysis.
 """
 
 import os
 
 from ..ast_utils import parse, txt, find_all, is_bool
 from .. import lang as _lang
+from ..adapters import get_adapter
 
 _METHOD_NODE_TYPES = ('method_declaration', 'function_declaration',
                       'function_definition', 'method_definition')
@@ -21,7 +23,7 @@ _SKIP_NAME_PATTERNS = ('__find_views_',)
 # ── AST helpers ─────────────────────────────────────────────
 
 def _find_enclosing_class(node, cb):
-    """Walk up the AST to find the enclosing class name and type."""
+    """Walk up the AST to find the enclosing class name, type, and line range."""
     p = node.parent
     while p:
         if p.type in _CLASS_NODE_TYPES:
@@ -34,9 +36,11 @@ def _find_enclosing_class(node, cb):
                     if c.type in ('identifier', 'simple_identifier', 'type_identifier'):
                         name = txt(c, cb)
                         break
-            return name, p.type
+            cls_start = cb[:p.start_byte].count(b'\n')
+            cls_end = cb[:p.end_byte].count(b'\n')
+            return name, p.type, cls_start, cls_end
         p = p.parent
-    return None, None
+    return None, None, None, None
 
 
 def _get_package_name(root, cb) -> str | None:
@@ -152,8 +156,64 @@ def _get_body(node, cb):
     return None
 
 
-def _is_return_constant(body_node, cb):
-    """``'true'`` / ``'false'`` if body is ``return <bool>``, else ``None``."""
+_NULL_TYPES = frozenset({'null_literal', 'nil'})
+_INT_TYPES = frozenset({
+    'decimal_integer_literal', 'integer_literal', 'int_literal',
+    'hex_integer_literal', 'octal_integer_literal', 'binary_integer_literal',
+    'number_literal', 'long_literal',
+})
+_FLOAT_TYPES = frozenset({
+    'decimal_floating_point_literal', 'hex_floating_point_literal',
+    'real_literal', 'float_literal',
+})
+_STRING_TYPES = frozenset({
+    'string_literal', 'interpreted_string_literal', 'raw_string_literal',
+    'character_literal', 'rune_literal',
+})
+_NUMERIC_TYPES = _INT_TYPES | _FLOAT_TYPES
+
+
+def _classify_constant_expr(expr, cb) -> tuple[str, str] | None:
+    """Classify a single AST expression node as a constant.
+
+    Returns ``(kind, value_text)`` or ``None``.
+    """
+    bool_val = is_bool(expr, cb)
+    if bool_val:
+        return ('boolean', bool_val)
+
+    if expr.type in _NULL_TYPES:
+        return ('null_return', txt(expr, cb))
+    if expr.type in ('identifier', 'simple_identifier'):
+        t = cb[expr.start_byte:expr.end_byte]
+        if t in (b'null', b'nil'):
+            return ('null_return', t.decode())
+
+    if expr.type in _INT_TYPES | _FLOAT_TYPES:
+        return ('constant', txt(expr, cb))
+
+    if expr.type in _STRING_TYPES:
+        value_text = txt(expr, cb)
+        if len(value_text) <= 200:
+            return ('constant', value_text)
+
+    if expr.type in ('unary_expression', 'prefix_expression'):
+        children = expr.children
+        if len(children) == 2:
+            op_text = cb[children[0].start_byte:children[0].end_byte]
+            if op_text == b'-' and children[1].type in _NUMERIC_TYPES:
+                return ('constant', txt(expr, cb))
+
+    return None
+
+
+def _is_return_constant(body_node, cb) -> tuple[str, str] | None:
+    """Detect constant-returning method bodies.
+
+    Returns ``(kind, value)`` where *kind* is ``'boolean'`` or
+    ``'constant'``, or ``None`` if the body is not a single-return
+    constant.
+    """
     stmts = [c for c in body_node.named_children
              if c.type not in ('comment', 'block_comment', 'multiline_comment', 'line_comment')]
     if len(stmts) == 0:
@@ -164,12 +224,13 @@ def _is_return_constant(body_node, cb):
     if len(stmts) != 1:
         return None
     stmt = stmts[0]
-    if stmt.type not in ('return_statement', 'jump_expression', 'control_transfer_statement'):
+    if stmt.type not in ('return_statement', 'jump_expression',
+                          'control_transfer_statement', 'return_expression'):
         return None
     ret_children = [c for c in stmt.named_children if c.type not in ('comment', 'return')]
     if len(ret_children) != 1:
         return None
-    return is_bool(ret_children[0], cb)
+    return _classify_constant_expr(ret_children[0], cb)
 
 
 def _is_empty_void(body_node, cb) -> bool:
@@ -215,14 +276,18 @@ def _get_return_type(node, cb) -> str:
     return 'other'
 
 
-def _scan_method_records(filepath: str, cb: bytes, ext: str, *, include_all: bool) -> list[dict]:
+def _scan_method_records(filepath: str, cb: bytes, ext: str, *,
+                         include_all: bool, module: str | None = None) -> list[dict]:
     """Scan *filepath* and return method records.
 
     When include_all is false, only dead-method candidates are returned.
+    The language adapter for *ext* is consulted for entry-point detection
+    and visibility-based safety analysis.
     """
     _lang._current_ext = ext
     root, _ = parse(cb)
     package_name = _get_package_name(root, cb)
+    adapter = get_adapter(ext)
     methods: list[dict] = []
 
     for node_type in _METHOD_NODE_TYPES:
@@ -248,18 +313,44 @@ def _scan_method_records(filepath: str, cb: bytes, ext: str, *, include_all: boo
 
             is_private = 'private' in mods
             is_static  = 'static' in mods
-            safe_to_inline = is_private or is_static
-            class_name, class_type = _find_enclosing_class(node, cb)
+            class_name, class_type, cls_start, cls_end = _find_enclosing_class(node, cb)
+
+            record_preview = {
+                'name': name,
+                'is_private': is_private,
+                'is_static': is_static,
+                'all_mods': mods,
+                'class_name': class_name,
+                'class_type': class_type,
+                'param_count': param_count,
+            }
+            if adapter:
+                safe_to_inline = adapter.compute_safe_to_inline(record_preview)
+                is_entry = adapter.is_entry_point(record_preview)
+            else:
+                safe_to_inline = is_private or is_static
+                is_entry = False
+
+            if is_entry and not include_all:
+                continue
 
             ret_type  = _get_return_type(node, cb)
-            const_val = _is_return_constant(body, cb)
+            const_result = _is_return_constant(body, cb)
             is_void   = _is_empty_void(body, cb)
 
             kind = value = None
-            if const_val is not None and ret_type in ('boolean', 'other'):
-                kind  = 'boolean'
-                value = const_val
-            elif is_void and ret_type in ('void', 'other'):
+            if const_result is not None:
+                c_kind, c_value = const_result
+                if c_kind == 'boolean' and ret_type in ('boolean', 'other'):
+                    kind = 'boolean'
+                    value = c_value
+                elif c_kind == 'null_return' and ret_type != 'void':
+                    kind = 'null_return'
+                    value = c_value
+                elif c_kind == 'constant' and ret_type != 'void':
+                    kind = 'constant'
+                    value = c_value
+            if kind is None and is_void and ret_type in ('void', 'other'):
                 kind = 'void'
 
             if kind is None and not include_all:
@@ -289,11 +380,15 @@ def _scan_method_records(filepath: str, cb: bytes, ext: str, *, include_all: boo
                 'name': name,
                 'kind': kind,
                 'value': value,
-                'is_dead_candidate': kind is not None and not excluded_by_modifier and not has_annotation,
+                'is_dead_candidate': kind is not None and not excluded_by_modifier
+                                     and not has_annotation and not is_entry,
                 'package_name': package_name,
+                'module': module,
                 'source_set': _get_source_set(filepath),
                 'class_name': class_name,
                 'class_type': class_type,
+                'class_start': cls_start,
+                'class_end': cls_end,
                 'param_count': param_count,
                 'safe_to_inline': safe_to_inline,
                 'is_private': is_private,
@@ -311,16 +406,18 @@ def _scan_method_records(filepath: str, cb: bytes, ext: str, *, include_all: boo
 
 # ── public API ──────────────────────────────────────────────
 
-def scan_method_definitions(filepath: str, cb: bytes, ext: str) -> list[dict]:
+def scan_method_definitions(filepath: str, cb: bytes, ext: str,
+                            *, module: str | None = None) -> list[dict]:
     """Scan *filepath* and return all concrete method definitions."""
-    return _scan_method_records(filepath, cb, ext, include_all=True)
+    return _scan_method_records(filepath, cb, ext, include_all=True, module=module)
 
 
-def scan_methods(filepath: str, cb: bytes, ext: str) -> list[dict]:
+def scan_methods(filepath: str, cb: bytes, ext: str,
+                 *, module: str | None = None) -> list[dict]:
     """Scan *filepath* and return a list of dead-method info dicts.
 
     Each dict contains: name, kind, value, class_name, class_type,
     param_count, safe_to_inline, is_private, is_static, all_mods,
-    decl_start, decl_end, start_byte, end_byte, filepath.
+    decl_start, decl_end, start_byte, end_byte, filepath, module.
     """
-    return _scan_method_records(filepath, cb, ext, include_all=False)
+    return _scan_method_records(filepath, cb, ext, include_all=False, module=module)

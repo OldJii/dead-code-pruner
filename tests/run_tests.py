@@ -18,12 +18,7 @@ TEST_FILES = [
     ('test_kotlin.kt', 'test_kotlin_expected.kt'),
     ('test_go.go', 'test_go_expected.go'),
     ('test_swift.swift', 'test_swift_expected.swift'),
-    ('test_js.js', 'test_js_expected.js'),
-    ('test_ts.ts', 'test_ts_expected.ts'),
-    ('test_c.c', 'test_c_expected.c'),
-    ('test_cpp.cpp', 'test_cpp_expected.cpp'),
-    ('test_rust.rs', 'test_rust_expected.rs'),
-    ('test_csharp.cs', 'test_csharp_expected.cs'),
+    ('test_dart.dart', 'test_dart_expected.dart'),
 ]
 
 

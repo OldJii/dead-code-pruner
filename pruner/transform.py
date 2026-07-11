@@ -6,13 +6,20 @@ convergence loop.
 """
 
 import os
+import sys
 import yaml
+
 from . import lang as _lang
-from .steps.constant_fold import step1_replace
+from . import ui
+from .steps.constant_fold import (
+    step1_replace, step1b_propagate_locals, step1c_remove_unused_bool_vars,
+)
 from .steps.bool_simplify import step2_simple
 from .steps.compound_bool import step3_compound
 from .steps.if_blocks import step4_if_blocks
+from .steps.unreachable import step1d_remove_unreachable
 from .steps.kotlin_expr import kotlin_if_expr
+from .validation import validate_transformation
 
 
 def run_pipeline(cb: bytes, replacements=None, is_kt: bool = False,
@@ -21,18 +28,22 @@ def run_pipeline(cb: bytes, replacements=None, is_kt: bool = False,
     _lang._current_ext = ext
     if replacements is None:
         replacements = []
+    original = cb
     for _ in range(max_rounds):
         prev = cb
         if replacements:
             cb = step1_replace(cb, replacements)
+        cb = step1b_propagate_locals(cb)
         cb = step2_simple(cb)
         cb = step3_compound(cb)
-        if ext == '.java':
+        if ext in ('.kt', '.kts'):
             cb = kotlin_if_expr(cb)
         cb = step4_if_blocks(cb, is_kt)
+        cb = step1d_remove_unreachable(cb)
+        cb = step1c_remove_unused_bool_vars(cb)
         if cb == prev:
             break
-    return cb
+    return validate_transformation(original, cb, ext)
 
 
 def load_config(path: str) -> list[tuple[str, str]]:
@@ -74,13 +85,12 @@ def process_file(filepath: str, replacements: list[tuple[str, str]]) -> bool:
     """Apply the full single-file pipeline to *filepath*. Returns ``True`` if modified."""
     ext = os.path.splitext(filepath)[1].lower()
     if ext not in _lang._PARSERS:
-        print(f"  SKIP (unsupported ext): {filepath}")
         return False
     try:
         with open(filepath, 'rb') as f:
             cb = f.read()
     except Exception as e:
-        print(f"  ERROR reading {filepath}: {e}")
+        ui.error(f"reading {filepath}: {e}")
         return False
 
     is_kt = ext in ('.kt', '.kts')

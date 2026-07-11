@@ -834,79 +834,6 @@ public class TestAllCases {
   }
 
   // ============================================================
-  // 第二十一组：Kotlin if 表达式（无分号）
-  // ============================================================
-
-  // Case 21.1: return if(true) { A } else EXPR（block + else expr）
-  fun case21_1() {
-    return false
-  }
-
-  // Case 21.2: return if(false) { A } else EXPR
-  fun case21_2() {
-    return RemoteConfig.getInstance().getBoolean(ALL_MY_LIKES_SHOW)
-  }
-
-  // Case 21.3: 赋值 if(false) A else B（Kotlin 多行赋值，无分号）
-  fun case21_3() {
-    selectedIdx = selectedIdx
-    selectedIdx = selectedIdx.coerceAtLeast(0)
-  }
-
-  // Case 21.4: 赋值 if(true) A else B（Kotlin 多行赋值，无分号）
-  fun case21_4() {
-    selectedIdx = 0
-    selectedIdx = selectedIdx.coerceAtLeast(0)
-  }
-
-  // Case 21.5: 同行赋值 val x = if(false) A else B（Kotlin）
-  fun case21_5() {
-    val x = "intl"
-    println(x)
-  }
-
-  // Case 21.6: return if(true) { 单表达式body } else EXPR
-  fun case21_6() {
-    return compute() + 1
-  }
-
-  // ============================================================
-  // 第二十二组：if(false) 无分号（Kotlin 语句删除安全性）
-  // ============================================================
-
-  // Case 22.1: if(false) return X 后面有大量代码不能被删除
-  fun case22_1(webView: WebView, url: String, context: Context): Boolean {
-    if (url.startsWith("sms:") || url.startsWith("smsto:")) {
-      try {
-        val sendIntent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
-        context.startActivity(sendIntent)
-      } catch (e: Exception) {
-        CrashHelper.reportError(e)
-      }
-      return true
-    }
-    return false
-  }
-
-  // Case 22.2: if(false) doSomething() 无分号（Kotlin 单行语句删除）
-  fun case22_2() {
-    beforeCode()
-    afterCode()
-  }
-
-  // Case 22.3: if(true) doAction() 无分号（Kotlin 单行展开）
-  fun case22_3() {
-    beforeCode()
-    doAction()
-    afterCode()
-  }
-
-  // Case 22.4: if(true) return 无分号 后面有代码应该删除
-  fun case22_4(): Boolean {
-    return false
-  }
-
-  // ============================================================
   // 第二十三组：switch/case 中的死代码边界
   // ============================================================
 
@@ -941,6 +868,29 @@ public class TestAllCases {
         return "intl";
       case 2:
         return "other";
+    }
+  }
+
+  // ============================================================
+  // 第二十四组：本地常量传播 (Step 1b)
+  // ============================================================
+
+  // Case 24.1: final boolean 本地变量传播
+  void case24_1() {
+    doIntl();
+  }
+
+  // Case 24.2: final boolean 传播后清理未使用声明
+  void case24_2() {
+    String result = "intl";
+    System.out.println(result);
+  }
+
+  // Case 24.3: 非 final 不应传播（可能被重新赋值）
+  void case24_3() {
+    boolean mutable = true;
+    if (mutable) {
+      doIntl();
     }
   }
 }

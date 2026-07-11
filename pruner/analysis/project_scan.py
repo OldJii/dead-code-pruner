@@ -2,6 +2,8 @@
 
 Replaces three separate full-project traversals (method scan, reference
 index, class hierarchy) with one pass that reads each file exactly once.
+Module-aware scanning is provided by ``ProjectLayout`` to avoid conflating
+same-named methods across different modules in multi-module projects.
 """
 
 import os
@@ -11,8 +13,10 @@ import time
 from collections import defaultdict
 
 from ..lang import _PARSERS, SKIP_DIRS
+from .. import ui
 from .method_scanner import scan_method_definitions
 from .ref_index import REFERENCE_EXTS, iter_reference_names
+from .project_layout import ProjectLayout
 
 
 _EXTENDS    = re.compile(r'\b(?:final\s+)?(?:class|object)\s+(\w+)\s*(?::|extends)\s+(\w+)')
@@ -26,7 +30,7 @@ class ProjectScanResult:
 
     __slots__ = ('all_files', 'ref_files', 'dead_methods', 'variant_conflicts', 'ref_index',
                  'children_map', 'final_classes', 'iface_abstract',
-                 'implements', 'elapsed')
+                 'implements', 'layout', 'elapsed')
 
     def __init__(self):
         self.all_files: list[str]               = []
@@ -38,6 +42,7 @@ class ProjectScanResult:
         self.final_classes: set[str]             = set()
         self.iface_abstract: set[str]            = set()
         self.implements: set[str]                = set()
+        self.layout: ProjectLayout | None        = None
         self.elapsed: float                      = 0.0
 
 
@@ -45,10 +50,18 @@ def scan_project(root_dir: str, *, progress_interval: int = 500) -> ProjectScanR
     """Walk *root_dir* once and collect method scan, reference index,
     and class hierarchy data in a single pass.
 
-    Prints progress every *progress_interval* files.
+    Detects multi-module project layout and includes module identity in
+    method records so that same-named methods across modules are not
+    conflated.  Prints progress every *progress_interval* files.
     """
     t0 = time.time()
     result = ProjectScanResult()
+    layout = ProjectLayout(root_dir)
+    result.layout = layout
+    ui.kv("Project layout", f"{layout.kind} ({len(layout.modules)} module(s))")
+    if len(layout.modules) > 1:
+        for mod_name in layout.modules:
+            ui.info(f"  · {mod_name}", indent=4)
     supported = frozenset(_PARSERS.keys())
 
     # Phase A: collect source files and semantic reference files.
@@ -66,16 +79,13 @@ def scan_project(root_dir: str, *, progress_interval: int = 500) -> ProjectScanR
     total = len(result.all_files)
     dead_count = 0
     method_defs_by_key: dict[tuple, list[dict]] = defaultdict(list)
-    print(f"  Unified scan: {total} source files")
+    ui.info(f"Unified scan: {total} source files")
 
     # Phase B: single-pass analysis
     for idx, fp in enumerate(result.all_files):
         if (idx + 1) % progress_interval == 0 or idx + 1 == total:
-            pct = (idx + 1) * 100 // total
-            print(f"\r  Scanning... {idx+1}/{total} ({pct}%)  "
-                  f"[{dead_count} dead methods, "
-                  f"{len(result.ref_index)} unique calls]",
-                  end='', flush=True)
+            ui.progress(idx + 1, total, "Scanning",
+                        f"{dead_count} dead methods, {len(result.ref_index)} refs")
 
         ext = os.path.splitext(fp)[1].lower()
         try:
@@ -86,9 +96,10 @@ def scan_project(root_dir: str, *, progress_interval: int = 500) -> ProjectScanR
 
         content = cb.decode('utf-8', errors='replace')
 
-        # 1) Method scan
+        # 1) Method scan (module-aware)
         try:
-            methods = scan_method_definitions(fp, cb, ext)
+            mod_name = layout.get_module(fp)
+            methods = scan_method_definitions(fp, cb, ext, module=mod_name)
             for method in methods:
                 key = semantic_method_key(method)
                 method_defs_by_key[key].append(method)
@@ -96,7 +107,7 @@ def scan_project(root_dir: str, *, progress_interval: int = 500) -> ProjectScanR
                     result.dead_methods.append(method)
                     dead_count += 1
         except Exception as e:
-            print(f"\n  WARN scan {fp}: {e}", file=sys.stderr)
+            ui.warn(f"scan {fp}: {e}")
 
         # 2) Reference index (method calls + method references)
         for name in iter_reference_names(content):
@@ -137,15 +148,21 @@ def scan_project(root_dir: str, *, progress_interval: int = 500) -> ProjectScanR
             result.variant_conflicts.add(key)
 
     result.elapsed = time.time() - t0
-    print(f"\n  Scan complete: {dead_count} dead methods, "
-          f"{len(result.children_map)} class hierarchies  "
-          f"({result.elapsed:.1f}s)")
+    ui.progress_done()
+    ui.info(f"Scan complete: {dead_count} dead methods, "
+            f"{len(result.children_map)} class hierarchies  "
+            f"{ui.dim(ui.fmt_elapsed(result.elapsed))}")
     return result
 
 
 def semantic_method_key(method: dict) -> tuple:
-    """Source-set independent method identity."""
+    """Module-aware, source-set independent method identity.
+
+    Including the module prevents conflation of same-named methods across
+    different Gradle sub-projects, Go modules, or Dart packages.
+    """
     return (
+        method.get('module'),
         method.get('package_name'),
         method.get('class_name'),
         method.get('name'),
