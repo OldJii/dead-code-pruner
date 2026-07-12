@@ -385,3 +385,18 @@ func case23_2(t: Int) -> String {
         return ""
     }
 }
+
+// ============================================================
+// Group 24: Local let propagation
+// ============================================================
+
+func case24_1() {
+    doIntl()
+}
+
+func case24_multiline(flag: Bool) {
+    useBool(false)
+}
+
+func otherCheck() -> Bool { return true }
+func useBool(_ b: Bool) { print(b) }

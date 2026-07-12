@@ -1,25 +1,29 @@
-"""Step 6 — dead method detection and cleanup.
+"""Step 6 — dead declaration detection and cleanup.
 
 Pipeline:
-  1. Unified scan: collect dead methods + reference index + class hierarchy
-     in a single pass over all source files.
-  2. Safety analysis: enhance leaf/final class methods, pre-check public
-     instance methods for cross-file references.
-  3. Iterative call replacement: replace boolean call sites with constant
-     values, remove void calls, then re-simplify modified files.
-  4. Definition deletion: remove method definitions that have no remaining
-     references.
+  1. Unified scan: methods + fields + reference index + contract graph.
+  2. Safety analysis via ``ContractGraph`` / language adapters (no
+     class-name heuristics or ad-hoc public promotion patches).
+  3. Iterative call replacement for zero-arg constant/void methods.
+  4. Definition deletion for unreferenced safe methods (including
+     unused non-constant methods and unused fields).
+  5. Bound leading comments are removed with their host declaration.
 """
+
+from __future__ import annotations
 
 import os
 import re
 import time
+from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from .. import lang as _lang
 from .. import ui
-from ..analysis.project_scan import scan_project, semantic_method_key
-from ..analysis.ref_index import build_ref_index, is_in_comment_or_string
-from ..analysis.class_hierarchy import enhance_safety, is_framework_class
+from ..analysis.project_scan import scan_project, semantic_method_key, ProjectScanResult
+from ..analysis.ref_index import clear_text_index_cache
+from ..analysis.class_hierarchy import enhance_safety
+from ..analysis.contracts import promote_unreferenced
 from ..analysis.code_edit import (
     replace_calls_in_content, remove_void_calls_in_content,
     clean_standalone_booleans, clean_standalone_constants,
@@ -27,6 +31,7 @@ from ..analysis.code_edit import (
     has_dynamic_symbol_ref, verify_no_dangling_calls,
 )
 from ..analysis.method_scanner import scan_methods
+from ..analysis.field_scanner import scan_fields
 from ..validation import validate_transformation
 from ..steps.constant_fold import step1b_propagate_locals, step1c_remove_unused_bool_vars
 from ..steps.bool_simplify import step2_simple
@@ -34,9 +39,89 @@ from ..steps.compound_bool import step3_compound
 from ..steps.if_blocks import step4_if_blocks
 from ..steps.unreachable import step1d_remove_unreachable
 
+_MIN_PARALLEL = 50
+
+
+def _simplify_files_worker(file_paths):
+    """Worker: run step1b-4 simplification on a batch of files."""
+    from .. import lang as _lang
+    from ..steps.constant_fold import step1b_propagate_locals, step1c_remove_unused_bool_vars
+    from ..steps.bool_simplify import step2_simple
+    from ..steps.compound_bool import step3_compound
+    from ..steps.if_blocks import step4_if_blocks
+    from ..steps.unreachable import step1d_remove_unreachable
+    from ..validation import validate_transformation
+
+    for fp in file_paths:
+        try:
+            with open(fp, 'rb') as f:
+                cb = f.read()
+            original_cb = cb
+            ext = os.path.splitext(fp)[1].lower()
+            _lang._current_ext = ext
+            for _ in range(5):
+                prev = cb
+                cb = step1b_propagate_locals(cb)
+                cb = step2_simple(cb)
+                cb = step3_compound(cb)
+                cb = step4_if_blocks(cb, ext in ('.kt', '.kts'))
+                cb = step1d_remove_unreachable(cb)
+                cb = step1c_remove_unused_bool_vars(cb)
+                if cb == prev:
+                    break
+            cb = validate_transformation(original_cb, cb, ext)
+            if cb != original_cb:
+                with open(fp, 'wb') as f:
+                    f.write(cb)
+        except Exception:
+            pass
+
+
+def _scan_field_refs_worker(args):
+    """Worker: extract word occurrences matching candidate field names."""
+    file_paths, candidate_names_list = args
+    candidate_set = frozenset(candidate_names_list)
+    word_pat = re.compile(r'\b(\w+)\b')
+    refs: dict[str, list[str]] = {}
+    for fp in file_paths:
+        try:
+            with open(fp, 'r', encoding='utf-8', errors='ignore') as fh:
+                content = fh.read()
+        except Exception:
+            continue
+        for word in word_pat.findall(content):
+            if word in candidate_set:
+                refs.setdefault(word, []).append(fp)
+    return refs
+
+
+def _simplify_single(fp: str) -> None:
+    """Sequential fallback: simplify one file in-place."""
+    try:
+        with open(fp, 'rb') as f:
+            cb = f.read()
+        original_cb = cb
+        ext = os.path.splitext(fp)[1].lower()
+        _lang._current_ext = ext
+        for _ in range(5):
+            prev = cb
+            cb = step1b_propagate_locals(cb)
+            cb = step2_simple(cb)
+            cb = step3_compound(cb)
+            cb = step4_if_blocks(cb, ext in ('.kt', '.kts'))
+            cb = step1d_remove_unreachable(cb)
+            cb = step1c_remove_unused_bool_vars(cb)
+            if cb == prev:
+                break
+        cb = validate_transformation(original_cb, cb, ext)
+        if cb != original_cb:
+            with open(fp, 'wb') as f:
+                f.write(cb)
+    except Exception:
+        pass
+
 
 def _method_key(method: dict) -> tuple:
-    """Stable project-level identity for a method candidate."""
     return (
         os.path.abspath(method.get('filepath', '')),
         method.get('class_name'),
@@ -47,21 +132,32 @@ def _method_key(method: dict) -> tuple:
     )
 
 
-def step6_project(root_dir: str, dry_run: bool = False) -> tuple[int, set[str]]:
-    """Run full dead-method cleanup on *root_dir*.
+def step6_project(root_dir: str, dry_run: bool = False,
+                  *, scan: ProjectScanResult | None = None,
+                  ) -> tuple[int, set[str]]:
+    """Run full dead-declaration cleanup on *root_dir*.
 
-    Returns ``(processed_count, modified_files)``."""
+    When *scan* is provided, skip the expensive full-project scan and use
+    the pre-computed data.  This enables incremental rounds without
+    re-reading the entire project.
+
+    Returns ``(processed_count, modified_files)``.
+    """
     t0 = time.time()
     ui.section("Step 6  Dead Method Cleanup")
+    clear_text_index_cache()
 
-    scan = scan_project(root_dir, progress_interval=500)
-    all_files   = scan.all_files
-    ref_files   = scan.ref_files
-    all_dead    = [
+    if scan is None:
+        scan = scan_project(root_dir, progress_interval=500)
+
+    ref_files = scan.ref_files
+    contracts = scan.contracts
+    content_cache = scan.content_cache
+    all_dead = [
         dm for dm in scan.dead_methods
         if semantic_method_key(dm) not in scan.variant_conflicts
     ]
-    ref_index   = dict(scan.ref_index)
+    ref_index = dict(scan.ref_index)
 
     void_count = sum(1 for d in all_dead if d['kind'] == 'void')
     bool_count = sum(1 for d in all_dead if d['kind'] == 'boolean')
@@ -75,172 +171,192 @@ def step6_project(root_dir: str, dry_run: bool = False) -> tuple[int, set[str]]:
         kind_str += f", null_return={null_count}"
     ui.info(f"Dead methods: {ui.bold(str(len(all_dead)))} ({kind_str}, safe={safe_count})")
 
-    # ── Phase 2: Safety analysis ────────────────────────────
     t_safety = time.time()
-    ui.info("Analyzing class hierarchy for safety promotion...")
+    ui.info("Analyzing contracts & hierarchy for safety...")
     enhanced = enhance_safety(
         all_dead, scan.children_map, scan.final_classes,
-        scan.iface_abstract, scan.implements)
+        scan.iface_abstract, scan.implements, contracts=contracts)
     safe_count = sum(1 for d in all_dead if d['safe_to_inline'])
-    ui.info(f"Promoted {enhanced} leaf/final → safe={safe_count}  "
+    ui.info(f"Promoted {enhanced} via contracts → safe={safe_count}  "
             f"{ui.dim(ui.fmt_elapsed(time.time()-t_safety))}")
+
+    unused_extra = _collect_unused_methods(scan, contracts, ref_index,
+                                            content_cache=content_cache)
+    if unused_extra:
+        ui.info(f"Unused non-constant methods: {len(unused_extra)}")
+        all_dead.extend(unused_extra)
 
     if dry_run:
         for dm in all_dead:
             rel = os.path.relpath(dm['filepath'], root_dir)
             safe_tag = f" {ui.green('[SAFE]')}" if dm.get('safe_to_inline') else ""
-            ui.info(f"{dm['kind']} {dm.get('class_name', '?')}.{dm['name']}"
-                    f"{'=' + dm['value'] if dm['value'] else ''}  "
+            val = dm.get('value')
+            ui.info(f"{dm.get('kind', '?')} {dm.get('class_name', '?')}.{dm['name']}"
+                    f"{'=' + val if val else ''}  "
                     f"{ui.dim(rel)}{safe_tag}", indent=4)
         return len(all_dead), set()
 
     t_pre = time.time()
-    _pre_check_public_methods(
-        all_dead, ref_index,
-        scan.children_map, scan.final_classes,
-        scan.iface_abstract, scan.implements)
+    _promote_unreferenced(all_dead, ref_index, contracts,
+                          content_cache=content_cache)
     safe_count = sum(1 for d in all_dead if d['safe_to_inline'])
     ui.info(f"Pre-check complete: safe={safe_count}  "
             f"{ui.dim(ui.fmt_elapsed(time.time()-t_pre))}")
 
     files_modified: set[str] = set()
     total_processed = 0
-
-    # ── Phase 3: Iterative call replacement ─────────────────
-    iteration = 0
     processed_methods: set[tuple] = set()
+    iteration = 0
+
     for iteration in range(5):
-        new_dead = [dm for dm in all_dead
-                    if dm.get('safe_to_inline') and _method_key(dm) not in processed_methods]
+        new_dead = [
+            dm for dm in all_dead
+            if dm.get('safe_to_inline')
+            and dm.get('kind') in ('void', 'boolean', 'constant')
+            and dm.get('param_count', 0) == 0
+            and _method_key(dm) not in processed_methods
+        ]
         if not new_dead:
             break
         ui.info(f"\nPhase 3 · round {iteration+1}: processing {len(new_dead)} methods...")
 
         round_modified: set[str] = set()
         round_processed = 0
-        for i, dm in enumerate(new_dead):
-            if (i + 1) % 100 == 0:
-                ui.progress(i + 1, len(new_dead), "Replacing calls", indent=4)
+        same_file_edits: dict[str, list[dict]] = {}
+        cross_file_edits: list[tuple[str, dict]] = []
 
+        for dm in new_dead:
             processed_methods.add(_method_key(dm))
-            name  = dm['name']
-            kind  = dm['kind']
-            value = dm.get('value')
-            cls   = dm.get('class_name')
-            src   = dm['filepath']
-            cls_scope = None
-            if dm.get('class_start') is not None and dm.get('class_end') is not None:
-                cls_scope = (dm['class_start'], dm['class_end'])
-            if dm.get('param_count', 0) > 0:
-                continue
+            same_file_edits.setdefault(dm['filepath'], []).append(dm)
+            if dm.get('class_name'):
+                src_abs = os.path.abspath(dm['filepath'])
+                for ref_file in ref_index.get(dm['name'], set()):
+                    if os.path.abspath(ref_file) != src_abs:
+                        cross_file_edits.append((ref_file, dm))
+
+        for src, methods in same_file_edits.items():
             try:
                 with open(src, 'r', encoding='utf-8') as f:
                     content = f.read()
-                if kind == 'void':
-                    new_content, cnt = remove_void_calls_in_content(
-                        content, name, cls, same_file=True, class_lines=cls_scope)
-                elif kind in ('boolean', 'constant'):
-                    new_content, cnt = replace_calls_in_content(
-                        content, name, value, cls, same_file=True, class_lines=cls_scope)
-                    new_content = clean_standalone_booleans(new_content)
-                    if kind == 'constant':
-                        new_content = clean_standalone_constants(new_content, value)
-                else:
-                    continue
-                if new_content != content:
+                original = content
+                cnt = 0
+                for dm in methods:
+                    cls_scope = None
+                    if dm.get('class_start') is not None and dm.get('class_end') is not None:
+                        cls_scope = (dm['class_start'], dm['class_end'])
+                    kind, name, value, cls = (
+                        dm['kind'], dm['name'], dm.get('value'), dm.get('class_name'))
+                    if kind == 'void':
+                        content, c = remove_void_calls_in_content(
+                            content, name, cls, same_file=True, class_lines=cls_scope)
+                    else:
+                        content, c = replace_calls_in_content(
+                            content, name, value, cls, same_file=True, class_lines=cls_scope)
+                        content = clean_standalone_booleans(content)
+                        if kind == 'constant':
+                            content = clean_standalone_constants(content, value)
+                    cnt += c
+                if content != original:
                     ext_v = os.path.splitext(src)[1].lower()
                     validated = validate_transformation(
-                        content.encode('utf-8'), new_content.encode('utf-8'), ext_v)
-                    new_content = validated.decode('utf-8', errors='replace')
-                    if new_content != content:
+                        original.encode('utf-8'), content.encode('utf-8'), ext_v)
+                    content = validated.decode('utf-8', errors='replace')
+                    if content != original:
                         with open(src, 'w', encoding='utf-8') as f:
-                            f.write(new_content)
+                            f.write(content)
                         round_modified.add(src)
                         round_processed += cnt
             except Exception as e:
                 ui.warn(f"{src}: {e}", indent=4)
 
-            if cls:
-                src_abs = os.path.abspath(src)
-                for ref_file in ref_index.get(name, set()):
-                    if os.path.abspath(ref_file) == src_abs:
+        by_ref: dict[str, list[dict]] = {}
+        for ref_file, dm in cross_file_edits:
+            by_ref.setdefault(ref_file, []).append(dm)
+        for ref_file, methods in by_ref.items():
+            try:
+                with open(ref_file, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                original = content
+                cnt = 0
+                for dm in methods:
+                    cls, name, kind, value = (
+                        dm.get('class_name'), dm['name'], dm['kind'], dm.get('value'))
+                    quick = (cls + '.' + name) if cls else name
+                    if quick not in content and name + '(' not in content:
                         continue
-                    try:
-                        with open(ref_file, 'r', encoding='utf-8') as f:
-                            content = f.read()
-                        quick = cls + '.' + name
-                        if quick not in content and name + '(' not in content:
-                            continue
-                        if kind == 'void':
-                            new_content, cnt = remove_void_calls_in_content(content, name, cls, same_file=False)
-                        elif kind in ('boolean', 'constant'):
-                            new_content, cnt = replace_calls_in_content(content, name, value, cls, same_file=False)
-                            new_content = clean_standalone_booleans(new_content)
-                            if kind == 'constant':
-                                new_content = clean_standalone_constants(new_content, value)
-                        else:
-                            continue
-                        if new_content != content:
-                            ext_v = os.path.splitext(ref_file)[1].lower()
-                            validated = validate_transformation(
-                                content.encode('utf-8'), new_content.encode('utf-8'), ext_v)
-                            new_content = validated.decode('utf-8', errors='replace')
-                            if new_content != content:
-                                with open(ref_file, 'w', encoding='utf-8') as f:
-                                    f.write(new_content)
-                                round_modified.add(ref_file)
-                                round_processed += cnt
-                    except Exception as e:
-                        ui.warn(f"{ref_file}: {e}", indent=4)
+                    if kind == 'void':
+                        content, c = remove_void_calls_in_content(
+                            content, name, cls, same_file=False)
+                    else:
+                        content, c = replace_calls_in_content(
+                            content, name, value, cls, same_file=False)
+                        content = clean_standalone_booleans(content)
+                        if kind == 'constant':
+                            content = clean_standalone_constants(content, value)
+                    cnt += c
+                if content != original:
+                    ext_v = os.path.splitext(ref_file)[1].lower()
+                    validated = validate_transformation(
+                        original.encode('utf-8'), content.encode('utf-8'), ext_v)
+                    content = validated.decode('utf-8', errors='replace')
+                    if content != original:
+                        with open(ref_file, 'w', encoding='utf-8') as f:
+                            f.write(content)
+                        round_modified.add(ref_file)
+                        round_processed += cnt
+            except Exception as e:
+                ui.warn(f"{ref_file}: {e}", indent=4)
 
-        if len(new_dead) >= 100:
-            ui.progress_done()
         files_modified |= round_modified
         total_processed += round_processed
 
         if round_modified:
             ui.info(f"Simplifying {len(round_modified)} modified files...", indent=4)
-            for j, fp in enumerate(round_modified):
-                if (j + 1) % 50 == 0:
-                    ui.progress(j + 1, len(round_modified), "Simplifying", indent=4)
+            mod_list = sorted(round_modified)
+            n_workers = min(os.cpu_count() or 1,
+                            max(1, len(mod_list) // _MIN_PARALLEL))
+            if n_workers > 1 and len(mod_list) >= _MIN_PARALLEL:
+                chunk_sz = max(1, (len(mod_list) + n_workers - 1) // n_workers)
+                chunks = [mod_list[i:i + chunk_sz]
+                          for i in range(0, len(mod_list), chunk_sz)]
                 try:
-                    with open(fp, 'rb') as f:
-                        cb = f.read()
-                    original_cb = cb
-                    ext = os.path.splitext(fp)[1].lower()
-                    _lang._current_ext = ext
-                    for _ in range(5):
-                        prev = cb
-                        cb = step1b_propagate_locals(cb)
-                        cb = step2_simple(cb)
-                        cb = step3_compound(cb)
-                        cb = step4_if_blocks(cb, ext in ('.kt', '.kts'))
-                        cb = step1d_remove_unreachable(cb)
-                        cb = step1c_remove_unused_bool_vars(cb)
-                        if cb == prev:
-                            break
-                    cb = validate_transformation(original_cb, cb, ext)
-                    if cb != original_cb:
-                        with open(fp, 'wb') as f:
-                            f.write(cb)
-                except Exception as e:
-                    ui.warn(f"re-simplify {fp}: {e}", indent=4)
-            if len(round_modified) >= 50:
-                ui.progress_done()
+                    with ProcessPoolExecutor(max_workers=n_workers) as ex:
+                        list(ex.map(_simplify_files_worker, chunks))
+                except Exception:
+                    for fp in mod_list:
+                        _simplify_single(fp)
+            else:
+                for fp in mod_list:
+                    _simplify_single(fp)
 
         ui.info(f"Round {iteration+1}: {round_processed} call sites, "
                 f"{len(round_modified)} files modified", indent=4)
-
         if not round_modified:
             break
 
     ui.info(f"Phase 3 complete: {total_processed} call sites  "
             f"({iteration+1} round{'s' if iteration > 0 else ''})")
 
+    # Phase 4: update ref_index incrementally for modified files only.
     ui.info("\nPhase 4: Deleting unreferenced definitions...")
     t_del = time.time()
-    ui.info("Rebuilding reference index...", indent=4)
-    ref_index = build_ref_index(ref_files)
+    if files_modified:
+        ui.info(f"Updating ref index for {len(files_modified)} modified files...", indent=4)
+        modified_set = set(files_modified)
+        for name_set in ref_index.values():
+            name_set -= modified_set
+        from ..analysis.ref_index import iter_reference_names
+        for fp in files_modified:
+            try:
+                with open(fp, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read()
+                content_cache[fp] = content
+                for name in iter_reference_names(content):
+                    if len(name) > 2:
+                        ref_index.setdefault(name, set()).add(fp)
+            except Exception:
+                pass
+    clear_text_index_cache()
 
     by_file: dict[str, list] = {}
     for dm in all_dead:
@@ -250,7 +366,7 @@ def step6_project(root_dir: str, dry_run: bool = False) -> tuple[int, set[str]]:
     del_count = 0
     files_to_process = list(by_file.items())
     for i, (fp, methods) in enumerate(files_to_process):
-        if (i + 1) % 50 == 0 or i + 1 == len(files_to_process):
+        if (i + 1) % 100 == 0 or i + 1 == len(files_to_process):
             ui.progress(i + 1, len(files_to_process), "Checking",
                         f"{del_count} deleted", indent=4)
         try:
@@ -261,23 +377,44 @@ def step6_project(root_dir: str, dry_run: bool = False) -> tuple[int, set[str]]:
             content = cb.decode('utf-8', errors='replace')
             ranges = []
             for dm in methods:
+                matched = None
                 for cm in current_methods:
-                    if cm['name'] != dm['name'] or cm['kind'] != dm['kind']:
+                    if cm['name'] != dm['name']:
                         continue
-                    if cm['kind'] in ('boolean', 'constant', 'null_return') and cm['value'] != dm.get('value'):
-                        continue
-                    if _has_same_file_refs(dm, cm, content):
+                    if dm.get('kind') == 'unused':
+                        matched = cm
                         break
-                    src_abs = os.path.abspath(fp)
-                    if not has_cross_file_refs(dm, ref_index, src_abs,
-                                              scan.children_map, scan.iface_abstract):
-                        ranges.append((cm['decl_start'], cm['decl_end']))
+                    if cm.get('kind') != dm.get('kind'):
+                        continue
+                    if (cm['kind'] in ('boolean', 'constant', 'null_return')
+                            and cm.get('value') != dm.get('value')):
+                        continue
+                    matched = cm
                     break
+                if matched is None and dm.get('kind') == 'unused':
+                    matched = dm
+                if matched is None:
+                    continue
+
+                if _has_same_file_refs(dm, matched, content):
+                    continue
+                src_abs = os.path.abspath(fp)
+                poly = contracts.has_polymorphic_targets(dm.get('class_name'))
+                if has_cross_file_refs(
+                        dm, ref_index, src_abs,
+                        scan.children_map, scan.iface_abstract,
+                        polymorphic=poly,
+                        content_cache=content_cache):
+                    continue
+                if contracts.is_contract_method(dm.get('class_name'), dm['name']):
+                    continue
+                ranges.append((matched['decl_start'], matched['decl_end']))
+
             if ranges:
                 new_content, cnt = delete_line_ranges(content, ranges)
                 if cnt > 0:
                     deleted_names = set()
-                    for start, end in ranges:
+                    for start, _end in ranges:
                         for dm in methods:
                             if dm['decl_start'] == start:
                                 deleted_names.add(dm['name'])
@@ -297,71 +434,292 @@ def step6_project(root_dir: str, dry_run: bool = False) -> tuple[int, set[str]]:
     ui.progress_done()
     ui.info(f"Phase 4: deleted {del_count} definitions  "
             f"{ui.dim(ui.fmt_elapsed(time.time()-t_del))}")
+
+    field_del = _cleanup_unused_fields(scan, files_modified)
+    del_count += field_del
+
     total_elapsed = time.time() - t0
     ui.info(f"Total: {len(files_modified)} files modified  "
             f"{ui.dim(ui.fmt_elapsed(total_elapsed))}")
+    clear_text_index_cache()
     return total_processed + del_count, files_modified
 
 
-# ── internal helpers ────────────────────────────────────────
+def _collect_unused_methods(scan, contracts, ref_index,
+                            content_cache: dict[str, str] | None = None,
+                            ) -> list[dict]:
+    """Find unused *static* methods with non-constant bodies.
 
-def _pre_check_public_methods(all_dead, ref_index, children_map,
-                              final_classes, iface_abstract, implements):
-    """Promote unreferenced non-private non-static instance methods to
-    safe-to-inline by verifying they have no same-file or cross-file
-    references.
-
-    Covers public, protected, and package-private methods regardless of
-    class hierarchy depth — the cross-file reference check already
-    catches ``super.method()`` calls and polymorphic invocations.
-    Methods declared in interfaces/abstract classes are skipped because
-    they serve as contracts for external implementors.
+    Restricted to static methods so private instance helpers with real
+    logic are not removed solely for lacking local callers (those often
+    remain as intentional extension points).  Static AB/flag helpers with
+    zero refs (e.g. ``CoreIntlController.isTabMeA``) are the target.
     """
-    candidates = [dm for dm in all_dead
-                  if not dm.get('safe_to_inline')
-                  and dm.get('class_type') != 'enum_declaration'
-                  and not dm.get('is_private')
-                  and 'static' not in dm.get('all_mods', set())]
+    from ..analysis.contracts import is_safe_to_remove
 
-    promoted = 0
-    for i, dm in enumerate(candidates):
-        if (i + 1) % 50 == 0:
-            ui.progress(i + 1, len(candidates), "Pre-checking",
-                        f"{promoted} promoted", indent=4)
+    already = {
+        (os.path.abspath(m['filepath']), m.get('class_name'), m['name'], m.get('param_count', 0))
+        for m in scan.dead_methods
+    }
 
-        cls = dm.get('class_name')
-        if not cls or is_framework_class(cls):
+    candidates: list[dict] = []
+    for m in scan.all_methods:
+        key = (os.path.abspath(m['filepath']), m.get('class_name'),
+               m['name'], m.get('param_count', 0))
+        if key in already:
             continue
-        if cls in iface_abstract:
+        if m.get('class_type') in ('interface_declaration', 'enum_declaration'):
+            continue
+        if not m.get('is_static'):
+            continue
+        mods = m.get('all_mods', set()) or set()
+        if mods & {'abstract', 'open', 'override', 'native', 'Override'}:
+            continue
+        if contracts.is_contract_method(m.get('class_name'), m['name']):
+            continue
+        if not is_safe_to_remove(m, contracts):
+            continue
+        candidates.append(m)
+
+    extra: list[dict] = []
+    files_read: dict[str, str] = {}
+    for m in candidates:
+        fp = m['filepath']
+        content = (content_cache or {}).get(fp)
+        if content is None:
+            content = files_read.get(fp)
+        if content is None:
+            try:
+                with open(fp, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read()
+                files_read[fp] = content
+            except Exception:
+                continue
+        if _has_same_file_refs_direct(
+                m['name'], m.get('param_count', 0),
+                content, m['decl_start'], m['decl_end']):
+            continue
+        src_abs = os.path.abspath(fp)
+        poly = contracts.has_polymorphic_targets(m.get('class_name'))
+        if has_cross_file_refs(m, ref_index, src_abs,
+                               scan.children_map, scan.iface_abstract,
+                               polymorphic=poly,
+                               content_cache=content_cache):
             continue
 
+        rec = dict(m)
+        rec['kind'] = 'unused'
+        rec['value'] = None
+        rec['safe_to_inline'] = True
+        rec['is_dead_candidate'] = True
+        extra.append(rec)
+    return extra
+
+
+_WORD_PAT = re.compile(r'\b(\w+)\b')
+
+
+def _read_current(fp: str, files_modified: set[str],
+                  scan: ProjectScanResult) -> str | None:
+    """Return current content for *fp*: disk for modified files, cache otherwise."""
+    if fp in files_modified:
         try:
-            with open(dm['filepath'], 'r', encoding='utf-8', errors='ignore') as f:
-                content = f.read()
-            has_ref = _has_same_file_refs_direct(
-                dm['name'], dm.get('param_count', 0),
-                content, dm['decl_start'], dm['decl_end'])
+            with open(fp, 'r', encoding='utf-8', errors='ignore') as fh:
+                return fh.read()
+        except Exception:
+            return None
+    cc = scan.content_cache.get(fp)
+    if cc is not None:
+        return cc
+    try:
+        with open(fp, 'r', encoding='utf-8', errors='ignore') as fh:
+            return fh.read()
+    except Exception:
+        return None
+
+
+def _cleanup_unused_fields(scan: ProjectScanResult,
+                           files_modified: set[str]) -> int:
+    """Remove unused private/static final fields.
+
+    Uses word extraction + frozenset lookup instead of a huge alternation
+    regex, making the scan O(text) instead of O(text × num_candidates).
+    """
+    ui.info("\nPhase 5: Unused field cleanup...")
+    t0 = time.time()
+
+    fresh_fields: list[dict] = [
+        f for f in scan.fields
+        if f['filepath'] not in files_modified
+    ]
+    for fp in files_modified:
+        ext = os.path.splitext(fp)[1].lower()
+        try:
+            with open(fp, 'rb') as fh:
+                cb = fh.read()
+            fresh_fields.extend(scan_fields(fp, cb, ext))
         except Exception:
             continue
 
-        src_abs = os.path.abspath(dm['filepath'])
-        if not has_ref and has_cross_file_refs(dm, ref_index, src_abs,
-                                              children_map, iface_abstract):
-            has_ref = True
+    candidate_fields: list[dict] = []
+    candidate_names: set[str] = set()
+    for f in fresh_fields:
+        if not f.get('is_final'):
+            continue
+        if not (f.get('is_private') or f.get('is_static')):
+            continue
+        candidate_fields.append(f)
+        candidate_names.add(f['name'])
+
+    if not candidate_names:
+        ui.info(f"Phase 5: no candidate fields  "
+                f"{ui.dim(ui.fmt_elapsed(time.time()-t0))}")
+        return 0
+
+    candidate_names_frozen = frozenset(candidate_names)
+
+    # Build field_refs: word extraction + frozenset lookup.
+    # Workers read from disk (OS page cache makes it fast).
+    field_refs: dict[str, set[str]] = defaultdict(set)
+    all_file_list = list(scan.all_files)
+    n_workers = min(os.cpu_count() or 1,
+                    max(1, len(all_file_list) // _MIN_PARALLEL))
+    if n_workers > 1 and len(all_file_list) >= _MIN_PARALLEL:
+        chunk_sz = max(1, (len(all_file_list) + n_workers - 1) // n_workers)
+        chunks = [all_file_list[i:i + chunk_sz]
+                  for i in range(0, len(all_file_list), chunk_sz)]
+        cand_list = list(candidate_names)
+        try:
+            with ProcessPoolExecutor(max_workers=n_workers) as ex:
+                futs = {ex.submit(_scan_field_refs_worker, (c, cand_list)): c
+                        for c in chunks}
+                for fut in as_completed(futs):
+                    for name, fps in fut.result().items():
+                        field_refs[name].update(fps)
+        except Exception:
+            for fp in all_file_list:
+                content = _read_current(fp, files_modified, scan)
+                if content is None:
+                    continue
+                for word in _WORD_PAT.findall(content):
+                    if word in candidate_names_frozen:
+                        field_refs[word].add(fp)
+    else:
+        for fp in all_file_list:
+            content = _read_current(fp, files_modified, scan)
+            if content is None:
+                continue
+            for word in _WORD_PAT.findall(content):
+                if word in candidate_names_frozen:
+                    field_refs[word].add(fp)
+
+    # Group candidates by file for batched same-file ref checking.
+    candidates_by_file: dict[str, list[dict]] = {}
+    for f in candidate_fields:
+        name = f['name']
+        refs = field_refs.get(name, set())
+        src_abs = os.path.abspath(f['filepath'])
+        if any(os.path.abspath(r) != src_abs for r in refs):
+            continue
+        candidates_by_file.setdefault(f['filepath'], []).append(f)
+
+    by_file: dict[str, list] = {}
+    for fp, fields in candidates_by_file.items():
+        content = _read_current(fp, files_modified, scan)
+        if content is None:
+            continue
+        lines = content.split('\n')
+        for f in fields:
+            if not _field_has_same_file_refs_lines(f['name'], lines,
+                                                    f['decl_start'], f['decl_end']):
+                by_file.setdefault(fp, []).append(f)
+
+    deleted = 0
+    for fp, fields in by_file.items():
+        try:
+            with open(fp, 'r', encoding='utf-8') as fh:
+                content = fh.read()
+            ranges = [(f['decl_start'], f['decl_end']) for f in fields]
+            new_content, cnt = delete_line_ranges(content, ranges)
+            if cnt > 0 and new_content != content:
+                with open(fp, 'w', encoding='utf-8') as fh:
+                    fh.write(new_content)
+                files_modified.add(fp)
+                deleted += cnt
+        except Exception as e:
+            ui.warn(f"field delete {fp}: {e}", indent=4)
+
+    ui.info(f"Phase 5: deleted {deleted} unused fields  "
+            f"{ui.dim(ui.fmt_elapsed(time.time()-t0))}")
+    return deleted
+
+
+def _field_has_same_file_refs_lines(name: str, lines: list[str],
+                                     decl_start: int, decl_end: int) -> bool:
+    """Check if *name* appears outside its declaration span.
+
+    Accepts pre-split *lines* so multiple fields in the same file share
+    one ``split('\\n')`` call.
+    """
+    pat = re.compile(r'\b' + re.escape(name) + r'\b')
+    for i, line in enumerate(lines):
+        if decl_start <= i <= decl_end:
+            continue
+        stripped = line.strip()
+        if stripped.startswith('//') or stripped.startswith('/*'):
+            continue
+        if pat.search(line):
+            return True
+    return False
+
+
+def _promote_unreferenced(all_dead, ref_index, contracts,
+                          content_cache: dict[str, str] | None = None):
+    candidates = [dm for dm in all_dead if not dm.get('safe_to_inline')]
+    promoted = 0
+    files_read: dict[str, str] = {}
+    for i, dm in enumerate(candidates):
+        if (i + 1) % 200 == 0:
+            ui.progress(i + 1, len(candidates), "Pre-checking",
+                        f"{promoted} promoted", indent=4)
+        fp = dm['filepath']
+        content = (content_cache or {}).get(fp)
+        if content is None:
+            content = files_read.get(fp)
+        if content is None:
+            try:
+                with open(fp, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read()
+                files_read[fp] = content
+            except Exception:
+                continue
+        has_ref = _has_same_file_refs_direct(
+            dm['name'], dm.get('param_count', 0),
+            content, dm['decl_start'], dm['decl_end'])
+
         if not has_ref:
+            src_abs = os.path.abspath(fp)
+            poly = contracts.has_polymorphic_targets(dm.get('class_name'))
+            if has_cross_file_refs(
+                    dm, ref_index, src_abs,
+                    contracts.children_map, contracts.iface_abstract,
+                    polymorphic=poly,
+                    content_cache=content_cache):
+                has_ref = True
+
+        if promote_unreferenced(dm, contracts, has_ref):
             dm['safe_to_inline'] = True
             promoted += 1
 
-    if len(candidates) >= 50:
+    if len(candidates) >= 200:
         ui.progress_done()
     if promoted:
-        ui.info(f"Promoted {promoted} non-private instance methods (unreferenced)", indent=4)
+        ui.info(f"Promoted {promoted} unreferenced methods", indent=4)
 
 
 def _has_same_file_refs_direct(method_name: str, param_count: int,
                                content: str, decl_start: int,
                                decl_end: int) -> bool:
-    """Check same-file references using known declaration line range."""
     lines = content.split('\n')
     if param_count == 0:
         call_pat = re.compile(r'(?<!\w)' + re.escape(method_name) + r'\s*\(\s*\)')
@@ -373,13 +731,13 @@ def _has_same_file_refs_direct(method_name: str, param_count: int,
             continue
         if line.strip().startswith('//') or line.strip().startswith('/*'):
             continue
-        if call_pat.search(line) or ref_pat.search(line) or has_dynamic_symbol_ref(line, method_name):
+        if (call_pat.search(line) or ref_pat.search(line)
+                or has_dynamic_symbol_ref(line, method_name)):
             return True
     return False
 
 
 def _has_same_file_refs(dm: dict, cm: dict, content: str) -> bool:
-    """Return ``True`` if *dm* has call-site references in the same file."""
     return _has_same_file_refs_direct(
         dm['name'], dm.get('param_count', 0),
         content, cm['decl_start'], cm['decl_end'])

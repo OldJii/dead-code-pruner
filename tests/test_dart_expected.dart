@@ -152,3 +152,69 @@ void case9_2() {
     doC();
   }
 }
+
+// ============================================================
+// Group 10: Compound boolean expansions
+// ============================================================
+
+void case10_1() { if (someCondition()) { doSomething(); } }
+void case10_2() { var b = isChinese; }
+void case10_3() { if (someCondition()) { doSomething(); } }
+void case10_4() { var b = someCondition; }
+void case10_5() { var s = "intl"; }
+
+// ============================================================
+// Group 11: Unreachable after return
+// ============================================================
+
+void case11_1() {
+  setup();
+  return;
+}
+
+bool case11_2() {
+  return true;
+}
+
+// ============================================================
+// Group 12: Multi-line assignment safety
+// ============================================================
+
+void case12_1(bool flag) {
+  bool isOneWay =
+      false;
+  use(isOneWay);
+}
+
+// ============================================================
+// Group 13: Local constant propagation
+// ============================================================
+
+void case13_1() {
+  doIntl();
+}
+
+void case13_2() {
+  final result = "intl";
+  print(result);
+}
+
+// ============================================================
+// Group 14: Nested ternary
+// ============================================================
+
+int case14_1(int x) {
+  return (x > 0 ? 1 : 2);
+}
+
+// ============================================================
+// Group 15: else-if chains
+// ============================================================
+
+void case15_1(int x) {
+  if (x > 0) {
+    doPositive();
+  } else {
+    doNegative();
+  }
+}

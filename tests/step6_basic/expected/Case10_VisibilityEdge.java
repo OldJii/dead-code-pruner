@@ -12,8 +12,6 @@ public class Case10_VisibilityEdge {
     protected void protectedInit() {
     }
 
-    // Case 10.5: private static final 字段上面紧接的 public 方法
-    private static final String TAG = "test";
     public void afterField() {
     }
 

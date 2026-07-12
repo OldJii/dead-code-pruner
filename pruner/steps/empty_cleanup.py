@@ -9,7 +9,7 @@ no code (only package/import declarations) are deleted.
 import os
 import re
 
-from ..ast_utils import parse, find_all, txt
+from ..ast_utils import parse, find_all, find_all_multi, txt, build_line_offsets, byte_to_line
 from ..lang import _PARSERS, SKIP_DIRS
 from .. import ui
 from ..analysis.ref_index import build_ref_index
@@ -84,15 +84,23 @@ def _is_class_empty(node, cb: bytes) -> bool:
 
 def _class_referenced_in_project(class_name: str, own_file: str,
                                   all_files: list[str],
-                                  decl_start: int, decl_end: int) -> bool:
+                                  decl_start: int, decl_end: int,
+                                  ref_index: dict[str, set[str]] | None = None,
+                                  ) -> bool:
     """Check if *class_name* appears in any file, including own_file.
 
-    For own_file, the declaration's own line range (decl_start..decl_end)
-    is excluded so the class name in its own header doesn't count.
+    When *ref_index* is provided, only files that actually mention
+    *class_name* are opened — avoids reading the entire project.
     """
     own_abs = os.path.abspath(own_file)
     pat = re.compile(r'\b' + re.escape(class_name) + r'\b')
-    for fp in all_files:
+
+    if ref_index is not None:
+        candidates = ref_index.get(class_name, set())
+    else:
+        candidates = all_files
+
+    for fp in candidates:
         try:
             with open(fp, 'r', encoding='utf-8', errors='ignore') as f:
                 content = f.read()
@@ -158,9 +166,9 @@ def step7_empty_cleanup(root_dir: str, dry_run: bool = False) -> dict:
         from .. import lang as _lang
         _lang._current_ext = ext
         root, _ = parse(cb)
+        line_offsets = build_line_offsets(cb)
 
-        for ct in _CLASS_NODE_TYPES:
-            for node in find_all(root, ct):
+        for node in find_all_multi(root, _CLASS_NODE_TYPES):
                 if not _is_class_empty(node, cb):
                     continue
                 name = _find_class_name(node, cb)
@@ -169,8 +177,8 @@ def step7_empty_cleanup(root_dir: str, dry_run: bool = False) -> dict:
                 if node.parent and node.parent.type in _CLASS_NODE_TYPES:
                     continue
 
-                start_line = cb[:node.start_byte].count(b'\n')
-                end_line = cb[:node.end_byte].count(b'\n')
+                start_line = byte_to_line(line_offsets, node.start_byte)
+                end_line = byte_to_line(line_offsets, node.end_byte)
                 empty_classes.append((fp, name, start_line, end_line))
 
     if not empty_classes:
@@ -179,13 +187,28 @@ def step7_empty_cleanup(root_dir: str, dry_run: bool = False) -> dict:
 
     ui.info(f"Found {len(empty_classes)} empty class candidate(s), checking references...")
 
+    # Build a lightweight ref_index for class name lookups.
+    class_names_needed = {cn for _, cn, _, _ in empty_classes}
+    class_ref_index: dict[str, set[str]] = {}
+    cn_pat = re.compile(
+        r'\b(' + '|'.join(re.escape(n) for n in class_names_needed) + r')\b')
+    for fp in all_files:
+        try:
+            with open(fp, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+        except Exception:
+            continue
+        for m in cn_pat.finditer(content):
+            class_ref_index.setdefault(m.group(1), set()).add(fp)
+
     classes_removed = 0
     files_to_check: set[str] = set()
 
     removable: list[tuple[str, str, int, int]] = []
     for fp, class_name, start_line, end_line in empty_classes:
         if _class_referenced_in_project(class_name, fp, all_files,
-                                         start_line, end_line):
+                                         start_line, end_line,
+                                         ref_index=class_ref_index):
             continue
         removable.append((fp, class_name, start_line, end_line))
 

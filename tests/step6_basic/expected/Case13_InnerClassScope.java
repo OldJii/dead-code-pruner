@@ -19,6 +19,4 @@ public class OuterClass {
   private static class AnotherInner {
   }
 
-  private static void afterAll() {
-  }
 }

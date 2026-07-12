@@ -7,6 +7,7 @@ boolean cleanup, line-range deletion, and cross-file reference detection.
 import os
 import re
 from .ref_index import REFERENCE_EXTS, is_in_comment_or_string
+from .text_index import clean_standalone_literal_lines
 
 
 def _is_reference_file(path: str) -> bool:
@@ -138,9 +139,12 @@ def remove_void_calls_in_content(content: str, method_name: str,
 
 
 def clean_standalone_booleans(content: str) -> str:
-    """Remove standalone ``true;`` / ``false;`` statements."""
-    lines = content.split('\n')
-    return '\n'.join(l for l in lines if l.strip() not in ('true;', 'false;'))
+    """Remove standalone ``true;`` / ``false;`` statements.
+
+    Multi-line assignment RHS lines (previous non-blank line ends with ``=``)
+    are preserved so forms like ``boolean x =\\n    false;`` stay valid.
+    """
+    return clean_standalone_literal_lines(content, {'true;', 'false;'})
 
 
 def clean_standalone_constants(content: str, value: str) -> str:
@@ -150,14 +154,18 @@ def clean_standalone_constants(content: str, value: str) -> str:
     ``method();`` become ``value;`` which is a useless expression statement.
     Only removes the semicolon-terminated form (``value;``) to avoid
     breaking Kotlin/Dart expression values or multi-line argument lists.
+    Multi-line assignment RHS lines are preserved.
     """
     target_with_semi = value.rstrip(';') + ';'
-    return '\n'.join(l for l in content.split('\n')
-                     if l.strip() != target_with_semi)
+    return clean_standalone_literal_lines(content, {target_with_semi})
 
 
 def delete_line_ranges(content: str, ranges: list[tuple[int, int]]) -> tuple[str, int]:
     """Delete *ranges* ``[(start_line, end_line), …]`` from *content*.
+
+    Lines that look like import/package declarations are never removed,
+    even if they fall within a deletion range (guards against AST line
+    drift that would accidentally strip imports).
 
     Returns ``(new_content, deleted_count)``.
     """
@@ -167,7 +175,16 @@ def delete_line_ranges(content: str, ranges: list[tuple[int, int]]) -> tuple[str
     deleted = 0
     for start, end in sorted(ranges, reverse=True):
         if 0 <= start <= end < len(lines):
-            del lines[start:end + 1]
+            safe_start = start
+            while safe_start <= end:
+                stripped = lines[safe_start].strip()
+                if stripped.startswith(('import ', 'package ')):
+                    safe_start += 1
+                else:
+                    break
+            if safe_start > end:
+                continue
+            del lines[safe_start:end + 1]
             deleted += 1
     final = []
     prev_blank = False
@@ -305,17 +322,23 @@ def verify_no_dangling_calls(content: str, method_names: set[str]) -> list[str]:
 
 def has_cross_file_refs(dm: dict, ref_index: dict, src_abs: str,
                         children_map: dict | None = None,
-                        iface_abstract: set | None = None) -> bool:
+                        iface_abstract: set | None = None,
+                        *,
+                        polymorphic: bool | None = None,
+                        content_cache: dict[str, str] | None = None) -> bool:
     """Return ``True`` if method *dm* has cross-file references.
+
+    When *content_cache* ``{filepath: content_str}`` is provided, file
+    contents are looked up from cache to avoid repeated disk I/O.
 
     Detection strategies (applied in order):
       1. Qualified:  ``ClassName.methodName`` in the file.
       2. Contextual: both ``ClassName`` and ``methodName(`` in the file.
       3. Instance:   bare ``methodName(`` **call** for non-private, non-static
-         methods.  To reduce false positives, when *children_map* is
-         provided and the declaring class has no known children/implementors,
-         files that never mention the class name are skipped (bare calls
-         there cannot target this class without inheritance).
+         methods.  When the declaring type participates in polymorphism
+         (subclasses, interface implements, abstract type), bare calls are
+         accepted without requiring the concrete class name — covering
+         casts like ``((Iface) x).method()``.
       4. Kotlin property: ``.isXxx`` / ``.xxx`` (for ``getXxx``) property
          access without parentheses — Java/Kotlin interop.
     """
@@ -325,11 +348,14 @@ def has_cross_file_refs(dm: dict, ref_index: dict, src_abs: str,
     is_static  = dm.get('is_static', False)
     is_instance = not is_private and not is_static
 
-    has_hierarchy = False
-    if is_instance and cls and children_map:
-        has_hierarchy = bool(children_map.get(cls))
-    if is_instance and cls and iface_abstract and cls in iface_abstract:
-        has_hierarchy = True
+    if polymorphic is None:
+        has_hierarchy = False
+        if is_instance and cls and children_map:
+            has_hierarchy = bool(children_map.get(cls))
+        if is_instance and cls and iface_abstract and cls in iface_abstract:
+            has_hierarchy = True
+    else:
+        has_hierarchy = bool(polymorphic)
 
     prop_name = _kotlin_property_name(name)
     check_property = prop_name is not None
@@ -341,11 +367,13 @@ def has_cross_file_refs(dm: dict, ref_index: dict, src_abs: str,
     for rf in ref_files:
         if os.path.abspath(rf) == src_abs:
             continue
-        try:
-            with open(rf, 'r', encoding='utf-8', errors='ignore') as fh:
-                rc = fh.read()
-        except Exception:
-            continue
+        rc = content_cache.get(rf) if content_cache else None
+        if rc is None:
+            try:
+                with open(rf, 'r', encoding='utf-8', errors='ignore') as fh:
+                    rc = fh.read()
+            except Exception:
+                continue
         if _is_reference_file(rf) and has_dynamic_symbol_ref(rc, name):
             return True
         if has_dynamic_symbol_ref(rc, name):

@@ -8,6 +8,7 @@ import re
 from collections import defaultdict
 from ..lang import _PARSERS, SKIP_DIRS
 from .. import ui
+from .text_index import TextIndex
 
 
 REFERENCE_EXTS = frozenset({
@@ -20,6 +21,11 @@ _SWIFT_SELECTOR_PAT = re.compile(
     r'#selector\s*\(\s*(?:getter:\s*|setter:\s*)?(?:(?:\w+)\.)?(\w+)\b')
 _IB_SELECTOR_PAT = re.compile(r'\bselector="([A-Za-z_]\w*)')
 _DOT_PROPERTY_PAT = re.compile(r'\.([a-z]\w*)\b(?!\s*\()')
+
+# Content-keyed cache.  Do NOT key by id(content) alone — CPython reuses
+# object ids after GC, which would return a stale TextIndex for a new string.
+_INDEX_CACHE: dict[tuple[int, int], TextIndex] = {}
+_INDEX_CACHE_ORDER: list[tuple[int, int]] = []
 
 
 def collect_files(root_dir: str, *, include_reference_files: bool = False) -> list[str]:
@@ -40,31 +46,47 @@ def iter_reference_names(content: str):
 
     Includes dot-property access patterns (e.g. ``.isEnabled``) to
     capture Kotlin-style property access of Java getters.
+
+    Rare patterns (``::ref``, ``#selector``, ``selector=``) are guarded
+    by cheap substring pre-checks so files without those constructs skip
+    the expensive regex entirely.
     """
     for m in _CALL_PAT.finditer(content):
         yield m.group(1)
-    for m in _REF_PAT.finditer(content):
-        yield m.group(1)
-    for m in _SWIFT_SELECTOR_PAT.finditer(content):
-        yield m.group(1)
-    for m in _IB_SELECTOR_PAT.finditer(content):
-        yield m.group(1)
-    for m in _DOT_PROPERTY_PAT.finditer(content):
-        yield m.group(1)
+    if '::' in content:
+        for m in _REF_PAT.finditer(content):
+            yield m.group(1)
+    if '#selector' in content:
+        for m in _SWIFT_SELECTOR_PAT.finditer(content):
+            yield m.group(1)
+    if 'selector="' in content:
+        for m in _IB_SELECTOR_PAT.finditer(content):
+            yield m.group(1)
+    if '.' in content:
+        for m in _DOT_PROPERTY_PAT.finditer(content):
+            yield m.group(1)
 
 
-def build_ref_index(all_files: list[str], *, quiet: bool = False) -> dict[str, set[str]]:
-    """Build a ``{method_name: {filepath, …}}`` reverse index."""
+def build_ref_index(all_files: list[str], *, quiet: bool = False,
+                    content_cache: dict[str, str] | None = None,
+                    ) -> dict[str, set[str]]:
+    """Build a ``{method_name: {filepath, …}}`` reverse index.
+
+    When *content_cache* is provided, file contents are read from cache
+    instead of disk.
+    """
     index: dict[str, set[str]] = defaultdict(set)
     total = len(all_files)
     for idx, fp in enumerate(all_files):
         if not quiet and ((idx + 1) % 1000 == 0 or idx + 1 == total):
             ui.progress(idx + 1, total, "Building ref index", indent=4)
-        try:
-            with open(fp, 'r', encoding='utf-8', errors='ignore') as f:
-                content = f.read()
-        except Exception:
-            continue
+        content = content_cache.get(fp) if content_cache else None
+        if content is None:
+            try:
+                with open(fp, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read()
+            except Exception:
+                continue
         for name in iter_reference_names(content):
             if len(name) > 2:
                 index[name].add(fp)
@@ -73,103 +95,25 @@ def build_ref_index(all_files: list[str], *, quiet: bool = False) -> dict[str, s
     return index
 
 
+def clear_text_index_cache() -> None:
+    """Drop cached ``TextIndex`` instances (call between major pipeline phases)."""
+    _INDEX_CACHE.clear()
+    _INDEX_CACHE_ORDER.clear()
+
+
 def is_in_comment_or_string(content: str, pos: int) -> bool:
     """Return ``True`` if *pos* falls inside a comment or string literal.
 
-    Handles string interpolation for Kotlin/Dart (``${expr}``) and
-    Swift (``\\(expr)``).  Code inside interpolation braces/parens is
-    treated as normal code, not as part of the enclosing string.
+    Uses a per-content ``TextIndex`` so repeated queries are O(log n) after
+    a single linear scan of the file.
     """
-    i = 0
-    in_lc = in_bc = False
-    str_stack: list[str] = []
-    interp_depth: list[int] = []
-
-    while i < pos:
-        c = content[i]
-
-        if in_lc:
-            if c == '\n':
-                in_lc = False
-            i += 1
-            continue
-
-        if in_bc:
-            if c == '*' and i + 1 < len(content) and content[i + 1] == '/':
-                in_bc = False
-                i += 2
-                continue
-            i += 1
-            continue
-
-        if interp_depth and interp_depth[-1] > 0:
-            if c == '{':
-                interp_depth[-1] += 1
-            elif c == '}':
-                interp_depth[-1] -= 1
-                if interp_depth[-1] == 0:
-                    interp_depth.pop()
-            elif c == '(' and str_stack and str_stack[-1] == 'swift_interp':
-                interp_depth[-1] += 1
-            elif c == ')' and str_stack and str_stack[-1] == 'swift_interp':
-                interp_depth[-1] -= 1
-                if interp_depth[-1] == 0:
-                    interp_depth.pop()
-                    str_stack.pop()
-            elif c == '/' and i + 1 < len(content):
-                if content[i + 1] == '/':
-                    in_lc = True
-                    i += 1
-                elif content[i + 1] == '*':
-                    in_bc = True
-                    i += 2
-                    continue
-            elif c in ('"', "'"):
-                str_stack.append(c)
-            i += 1
-            continue
-
-        if str_stack:
-            sc = str_stack[-1]
-            if sc == 'swift_interp':
-                i += 1
-                continue
-            if c == '\\':
-                if sc == '"' and i + 1 < len(content) and content[i + 1] == '(':
-                    str_stack.append('swift_interp')
-                    interp_depth.append(1)
-                    i += 2
-                    continue
-                i += 2
-                continue
-            if c == '$' and sc == '"' and i + 1 < len(content) and content[i + 1] == '{':
-                interp_depth.append(1)
-                i += 2
-                continue
-            if c == sc:
-                str_stack.pop()
-            i += 1
-            continue
-
-        if c == '/' and i + 1 < len(content):
-            if content[i + 1] == '/':
-                in_lc = True
-                i += 2
-                continue
-            if content[i + 1] == '*':
-                in_bc = True
-                i += 2
-                continue
-
-        if c in ('"', "'"):
-            str_stack.append(c)
-
-        i += 1
-
-    if in_lc or in_bc:
-        return True
-    if str_stack and not interp_depth:
-        return True
-    if interp_depth:
-        return False
-    return bool(str_stack)
+    key = (len(content), hash(content))
+    idx = _INDEX_CACHE.get(key)
+    if idx is None:
+        idx = TextIndex(content)
+        _INDEX_CACHE[key] = idx
+        _INDEX_CACHE_ORDER.append(key)
+        if len(_INDEX_CACHE_ORDER) > 64:
+            old = _INDEX_CACHE_ORDER.pop(0)
+            _INDEX_CACHE.pop(old, None)
+    return idx.covers(pos)

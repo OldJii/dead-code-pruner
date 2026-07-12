@@ -554,3 +554,24 @@ fun case24_2() {
     val result = if (flag) "intl" else "local"
     println(result)
 }
+
+// ============================================================
+// Group 25: Multi-line assignment safety
+// ============================================================
+
+fun case25_multiline(flag: Boolean) {
+    val isOneWay =
+        !INTL_FLAG
+            && flag
+            && otherCheck()
+    useBool(isOneWay)
+}
+
+fun otherCheck(): Boolean = true
+fun useBool(b: Boolean) { println(b) }
+
+fun case25_paren() {
+    if (notNull(data) && (true)) {
+        process(data)
+    }
+}

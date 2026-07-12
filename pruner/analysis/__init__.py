@@ -1,22 +1,20 @@
-"""Static analysis modules — method scanning, reference indexing, class hierarchy."""
+"""Analysis package — project scanning, editing, and safety helpers."""
 
-from .method_scanner import scan_methods
-from .ref_index import build_ref_index, collect_files, is_in_comment_or_string
-from .class_hierarchy import enhance_safety, is_framework_class
-from .code_edit import (
-    replace_calls_in_content, remove_void_calls_in_content,
-    clean_standalone_booleans, delete_line_ranges, has_cross_file_refs,
-    verify_no_dangling_calls,
+from .ref_index import (
+    build_ref_index, collect_files, is_in_comment_or_string, clear_text_index_cache,
 )
-from .project_scan import scan_project, ProjectScanResult
-from .project_layout import ProjectLayout
+from .code_edit import (
+    clean_standalone_booleans, delete_line_ranges, has_cross_file_refs,
+    replace_calls_in_content, remove_void_calls_in_content,
+)
+from .project_scan import scan_project, semantic_method_key
+from .contracts import ContractGraph, is_safe_to_remove
 
 __all__ = [
-    'scan_methods', 'build_ref_index', 'collect_files',
-    'is_in_comment_or_string',
-    'enhance_safety', 'is_framework_class',
-    'replace_calls_in_content', 'remove_void_calls_in_content',
+    'build_ref_index', 'collect_files', 'is_in_comment_or_string',
+    'clear_text_index_cache',
     'clean_standalone_booleans', 'delete_line_ranges', 'has_cross_file_refs',
-    'verify_no_dangling_calls',
-    'scan_project', 'ProjectScanResult', 'ProjectLayout',
+    'replace_calls_in_content', 'remove_void_calls_in_content',
+    'scan_project', 'semantic_method_key',
+    'ContractGraph', 'is_safe_to_remove',
 ]

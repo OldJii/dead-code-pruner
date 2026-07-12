@@ -3,6 +3,8 @@
 All operations are byte-offset based to match tree-sitter's byte positions.
 """
 
+import bisect
+
 from . import lang as _lang
 
 
@@ -27,6 +29,43 @@ def find_all(node, type_name: str) -> list:
             results.append(cur)
         stack.extend(reversed(cur.children))
     return results
+
+
+def find_all_multi(node, type_names: frozenset) -> list:
+    """Single DFS collecting all descendants whose type is in *type_names*."""
+    results = []
+    stack = [node]
+    while stack:
+        cur = stack.pop()
+        if cur.type in type_names:
+            results.append(cur)
+        stack.extend(reversed(cur.children))
+    return results
+
+
+# ── Line offset table ──────────────────────────────────────────
+
+def build_line_offsets(cb: bytes) -> list[int]:
+    """Build a list of byte offsets where each line starts.
+
+    ``offsets[i]`` is the byte offset of the first character of line *i*.
+    Use with `byte_to_line` for O(log n) line-number lookups instead of
+    the O(n) ``cb[:pos].count(b'\\n')`` pattern.
+    """
+    offsets = [0]
+    idx = 0
+    while True:
+        idx = cb.find(b'\n', idx)
+        if idx == -1:
+            break
+        idx += 1
+        offsets.append(idx)
+    return offsets
+
+
+def byte_to_line(offsets: list[int], byte_pos: int) -> int:
+    """Convert *byte_pos* to a 0-based line number in O(log n)."""
+    return bisect.bisect_right(offsets, byte_pos) - 1
 
 
 def bstr(s) -> bytes:

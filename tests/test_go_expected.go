@@ -479,3 +479,25 @@ func case23_2(t int) string {
 	}
 	return ""
 }
+
+// ============================================================
+// Group 24: Local constant-like bool (Go has no final; keep live uses)
+// ============================================================
+
+func case24_multiline(flag bool) {
+	isOneWay :=
+		false
+	useBool(isOneWay)
+}
+
+func otherCheck() bool { return true }
+func useBool(b bool) { println(b) }
+
+func case19_1(t int) interface{} {
+	return "gp"
+}
+
+func case20_exit() {
+	setup()
+	return
+}

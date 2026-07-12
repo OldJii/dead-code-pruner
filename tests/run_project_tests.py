@@ -101,6 +101,11 @@ def main():
     full_pipeline = os.path.join(SCRIPT_DIR, 'full_pipeline_semantic')
     results.append(run_full_pipeline_test('full_pipeline', full_pipeline))
 
+    multilang = os.path.join(SCRIPT_DIR, 'project_multilang')
+    for lang in ('java', 'kotlin', 'go', 'swift', 'dart'):
+        lang_dir = os.path.join(multilang, lang)
+        results.append(run_full_pipeline_test(f'multilang_{lang}', lang_dir))
+
     valid = [r for r in results if r is not None]
     passed = sum(1 for r in valid if r)
     failed = sum(1 for r in valid if not r)

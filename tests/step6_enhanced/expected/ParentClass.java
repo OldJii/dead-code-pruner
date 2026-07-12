@@ -20,6 +20,11 @@ public class ParentClass {
     return false;
   }
 
+  // 没有子类 Override → 但因为有子类存在，应视情况决定
+  public boolean noOverrideMethod() {
+    return true;
+  }
+
   // 有实际逻辑，不是死方法
   public boolean hasLogic() {
     return System.currentTimeMillis() > 0;

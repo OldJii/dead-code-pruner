@@ -201,3 +201,84 @@ void case9_2() {
     doC();
   }
 }
+
+// ============================================================
+// Group 10: Compound boolean expansions
+// ============================================================
+
+void case10_1() { if (true && someCondition()) { doSomething(); } }
+void case10_2() { var b = isChinese() && true; }
+void case10_3() { if (false || someCondition()) { doSomething(); } }
+void case10_4() { var b = someCondition() || false; }
+void case10_5() { var s = BuildConfig.IS_PRODUCTION ? "intl" : "local"; }
+
+// ============================================================
+// Group 11: Unreachable after return
+// ============================================================
+
+void case11_1() {
+  setup();
+  if (BuildConfig.IS_PRODUCTION) { return; }
+  deadA();
+  deadB();
+}
+
+bool case11_2() {
+  if (BuildConfig.IS_PRODUCTION) { return true; }
+  return compute();
+}
+
+// ============================================================
+// Group 12: Multi-line assignment safety
+// ============================================================
+
+void case12_1(bool flag) {
+  bool isOneWay =
+      !BuildConfig.IS_PRODUCTION
+          && flag
+          && other();
+  use(isOneWay);
+}
+
+// ============================================================
+// Group 13: Local constant propagation
+// ============================================================
+
+void case13_1() {
+  final bool isProd = BuildConfig.IS_PRODUCTION;
+  if (isProd) {
+    doIntl();
+  } else {
+    doLocal();
+  }
+}
+
+void case13_2() {
+  final flag = BuildConfig.IS_PRODUCTION;
+  final result = flag ? "intl" : "local";
+  print(result);
+}
+
+// ============================================================
+// Group 14: Nested ternary
+// ============================================================
+
+int case14_1(int x) {
+  return BuildConfig.IS_PRODUCTION
+      ? (x > 0 ? 1 : 2)
+      : 3;
+}
+
+// ============================================================
+// Group 15: else-if chains
+// ============================================================
+
+void case15_1(int x) {
+  if (!BuildConfig.IS_PRODUCTION) {
+    doLocal();
+  } else if (x > 0) {
+    doPositive();
+  } else {
+    doNegative();
+  }
+}

@@ -42,6 +42,7 @@ def step5_project(root_dir: str, dry_run: bool = False) -> tuple[int, set[str]]:
     total = len(all_files)
     all_defs_by_key: dict[tuple, list[dict]] = defaultdict(list)
     all_methods: list[dict] = []
+    content_cache: dict[str, str] = {}
     for idx, fp in enumerate(all_files):
         if (idx + 1) % 500 == 0 or idx + 1 == total:
             ui.progress(idx + 1, total, "Scanning",
@@ -54,6 +55,7 @@ def step5_project(root_dir: str, dry_run: bool = False) -> tuple[int, set[str]]:
                 cb = f.read()
             if b'return ' not in cb and b'= true' not in cb and b'= false' not in cb:
                 continue
+            content_cache[fp] = cb.decode('utf-8', errors='replace')
             mod_name = layout.get_module(fp)
             methods = scan_method_definitions(fp, cb, ext, module=mod_name)
             for m in methods:
@@ -96,66 +98,85 @@ def step5_project(root_dir: str, dry_run: bool = False) -> tuple[int, set[str]]:
                     f"{ui.dim(rel)}", indent=4)
         return len(all_methods), set()
 
-    ref_index = build_ref_index(collect_files(root_dir, include_reference_files=True))
+    # Build ref_index from cached content — no second full read.
+    ref_all = collect_files(root_dir, include_reference_files=True)
+    ref_index = build_ref_index(ref_all, content_cache=content_cache)
+    content_cache.clear()
+
     files_modified: set[str] = set()
     total_inlined = 0
 
+    # Group same-file edits to read each source once.
+    by_src: dict[str, list[dict]] = defaultdict(list)
     for m in all_methods:
-        name  = m['name']
-        value = m['value']
-        cls   = m['class_name']
-        src   = m['filepath']
-        cls_scope = None
-        if m.get('class_start') is not None and m.get('class_end') is not None:
-            cls_scope = (m['class_start'], m['class_end'])
+        by_src[m['filepath']].append(m)
 
+    for src, src_methods in by_src.items():
         try:
             with open(src, 'r', encoding='utf-8') as f:
                 content = f.read()
-            new_content, cnt = replace_calls_in_content(
-                content, name, value, cls, same_file=True, class_lines=cls_scope)
-            new_content = clean_standalone_booleans(new_content)
-            if value not in ('true', 'false'):
-                new_content = clean_standalone_constants(new_content, value)
-            if new_content != content:
+            original = content
+            cnt = 0
+            for m in src_methods:
+                cls_scope = None
+                if m.get('class_start') is not None and m.get('class_end') is not None:
+                    cls_scope = (m['class_start'], m['class_end'])
+                content, c = replace_calls_in_content(
+                    content, m['name'], m['value'], m['class_name'],
+                    same_file=True, class_lines=cls_scope)
+                content = clean_standalone_booleans(content)
+                if m['value'] not in ('true', 'false'):
+                    content = clean_standalone_constants(content, m['value'])
+                cnt += c
+            if content != original:
                 ext_v = os.path.splitext(src)[1].lower()
                 validated = validate_transformation(
-                    content.encode('utf-8'), new_content.encode('utf-8'), ext_v)
-                new_content = validated.decode('utf-8', errors='replace')
-                if new_content != content:
+                    original.encode('utf-8'), content.encode('utf-8'), ext_v)
+                content = validated.decode('utf-8', errors='replace')
+                if content != original:
                     with open(src, 'w', encoding='utf-8') as f:
-                        f.write(new_content)
+                        f.write(content)
                     files_modified.add(src)
                     total_inlined += cnt
         except Exception as e:
             ui.warn(f"same-file {src}: {e}")
 
-        if m['is_static'] and cls:
-            src_abs = os.path.abspath(src)
-            for ref_file in ref_index.get(name, set()):
-                if os.path.abspath(ref_file) == src_abs:
+    # Cross-file inlining: group by ref_file to read each once.
+    cross_edits: dict[str, list[dict]] = defaultdict(list)
+    for m in all_methods:
+        if m['is_static'] and m['class_name']:
+            src_abs = os.path.abspath(m['filepath'])
+            for rf in ref_index.get(m['name'], set()):
+                if os.path.abspath(rf) != src_abs:
+                    cross_edits[rf].append(m)
+
+    for ref_file, methods in cross_edits.items():
+        try:
+            with open(ref_file, 'r', encoding='utf-8') as f:
+                content = f.read()
+            original = content
+            cnt = 0
+            for m in methods:
+                cls, name, value = m['class_name'], m['name'], m['value']
+                if cls + '.' + name not in content:
                     continue
-                try:
-                    with open(ref_file, 'r', encoding='utf-8') as f:
-                        content = f.read()
-                    if cls + '.' + name not in content:
-                        continue
-                    new_content, cnt = replace_calls_in_content(
-                        content, name, value, cls, same_file=False)
-                    if value not in ('true', 'false'):
-                        new_content = clean_standalone_constants(new_content, value)
-                    if new_content != content:
-                        ext_v = os.path.splitext(ref_file)[1].lower()
-                        validated = validate_transformation(
-                            content.encode('utf-8'), new_content.encode('utf-8'), ext_v)
-                        new_content = validated.decode('utf-8', errors='replace')
-                        if new_content != content:
-                            with open(ref_file, 'w', encoding='utf-8') as f:
-                                f.write(new_content)
-                            files_modified.add(ref_file)
-                            total_inlined += cnt
-                except Exception as e:
-                    ui.warn(f"cross-file {ref_file}: {e}")
+                content, c = replace_calls_in_content(
+                    content, name, value, cls, same_file=False)
+                if value not in ('true', 'false'):
+                    content = clean_standalone_constants(content, value)
+                cnt += c
+            if content != original:
+                ext_v = os.path.splitext(ref_file)[1].lower()
+                validated = validate_transformation(
+                    original.encode('utf-8'), content.encode('utf-8'), ext_v)
+                content = validated.decode('utf-8', errors='replace')
+                if content != original:
+                    with open(ref_file, 'w', encoding='utf-8') as f:
+                        f.write(content)
+                    files_modified.add(ref_file)
+                    total_inlined += cnt
+        except Exception as e:
+            ui.warn(f"cross-file {ref_file}: {e}")
 
     deleted = 0
     by_file: dict[str, list] = defaultdict(list)
@@ -176,9 +197,9 @@ def step5_project(root_dir: str, dry_run: bool = False) -> tuple[int, set[str]]:
                     if (cm['name'] == dm['name']
                             and cm['kind'] in ('boolean', 'constant')
                             and cm['value'] == dm['value']):
-                        lines = content.split('\n')
                         has_ref = False
                         call_pat = re.compile(r'(?<!\w)' + re.escape(dm['name']) + r'\s*\(\s*\)')
+                        lines = content.split('\n')
                         for i, line in enumerate(lines):
                             if cm['decl_start'] <= i <= cm['decl_end']:
                                 continue
@@ -198,9 +219,7 @@ def step5_project(root_dir: str, dry_run: bool = False) -> tuple[int, set[str]]:
                     deleted_names = {dm['name'] for dm in methods
                                      if any(dm['decl_start'] == s for s, _ in ranges)}
                     dangling = verify_no_dangling_calls(new_content, deleted_names)
-                    if dangling:
-                        pass
-                    else:
+                    if not dangling:
                         with open(fp, 'w', encoding='utf-8') as f:
                             f.write(new_content)
                         files_modified.add(fp)

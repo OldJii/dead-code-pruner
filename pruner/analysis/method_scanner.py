@@ -8,12 +8,16 @@ detection and visibility-based safety analysis.
 
 import os
 
-from ..ast_utils import parse, txt, find_all, is_bool
+from ..ast_utils import (
+    parse, txt, find_all, find_all_multi, is_bool,
+    build_line_offsets, byte_to_line,
+)
 from .. import lang as _lang
 from ..adapters import get_adapter
 
 _METHOD_NODE_TYPES = ('method_declaration', 'function_declaration',
                       'function_definition', 'method_definition')
+_METHOD_NODE_SET = frozenset(_METHOD_NODE_TYPES)
 _CLASS_NODE_TYPES = ('class_declaration', 'class_definition',
                      'object_declaration', 'interface_declaration',
                      'enum_declaration')
@@ -22,7 +26,7 @@ _SKIP_NAME_PATTERNS = ('__find_views_',)
 
 # ── AST helpers ─────────────────────────────────────────────
 
-def _find_enclosing_class(node, cb):
+def _find_enclosing_class(node, cb, line_offsets=None):
     """Walk up the AST to find the enclosing class name, type, and line range."""
     p = node.parent
     while p:
@@ -36,8 +40,12 @@ def _find_enclosing_class(node, cb):
                     if c.type in ('identifier', 'simple_identifier', 'type_identifier'):
                         name = txt(c, cb)
                         break
-            cls_start = cb[:p.start_byte].count(b'\n')
-            cls_end = cb[:p.end_byte].count(b'\n')
+            if line_offsets is not None:
+                cls_start = byte_to_line(line_offsets, p.start_byte)
+                cls_end = byte_to_line(line_offsets, p.end_byte)
+            else:
+                cls_start = cb[:p.start_byte].count(b'\n')
+                cls_end = cb[:p.end_byte].count(b'\n')
             return name, p.type, cls_start, cls_end
         p = p.parent
     return None, None, None, None
@@ -277,21 +285,29 @@ def _get_return_type(node, cb) -> str:
 
 
 def _scan_method_records(filepath: str, cb: bytes, ext: str, *,
-                         include_all: bool, module: str | None = None) -> list[dict]:
+                         include_all: bool, module: str | None = None,
+                         root_node=None, line_offsets=None) -> list[dict]:
     """Scan *filepath* and return method records.
 
     When include_all is false, only dead-method candidates are returned.
     The language adapter for *ext* is consulted for entry-point detection
     and visibility-based safety analysis.
+
+    When *root_node* / *line_offsets* are supplied, the redundant re-parse
+    and line-offset rebuild are skipped (used by the unified scan to share
+    a single parse per file).
     """
     _lang._current_ext = ext
-    root, _ = parse(cb)
-    package_name = _get_package_name(root, cb)
+    if root_node is None:
+        root_node, _ = parse(cb)
+    if line_offsets is None:
+        line_offsets = build_line_offsets(cb)
+    package_name = _get_package_name(root_node, cb)
     adapter = get_adapter(ext)
     methods: list[dict] = []
+    source_set = _get_source_set(filepath)
 
-    for node_type in _METHOD_NODE_TYPES:
-        for node in find_all(root, node_type):
+    for node in find_all_multi(root_node, _METHOD_NODE_SET):
             mods = _get_modifiers(node, cb)
             excluded_by_modifier = bool(mods & {'abstract', 'open', 'override', 'native'})
             if excluded_by_modifier and not include_all:
@@ -313,7 +329,8 @@ def _scan_method_records(filepath: str, cb: bytes, ext: str, *,
 
             is_private = 'private' in mods
             is_static  = 'static' in mods
-            class_name, class_type, cls_start, cls_end = _find_enclosing_class(node, cb)
+            class_name, class_type, cls_start, cls_end = _find_enclosing_class(
+                node, cb, line_offsets)
 
             record_preview = {
                 'name': name,
@@ -356,8 +373,8 @@ def _scan_method_records(filepath: str, cb: bytes, ext: str, *,
             if kind is None and not include_all:
                 continue
 
-            start_line = cb[:node.start_byte].count(b'\n')
-            end_line   = cb[:node.end_byte].count(b'\n')
+            start_line = byte_to_line(line_offsets, node.start_byte)
+            end_line   = byte_to_line(line_offsets, node.end_byte)
             anno_start = node.start_byte
             if node.parent:
                 idx = None
@@ -374,7 +391,7 @@ def _scan_method_records(filepath: str, cb: bytes, ext: str, *,
                             anno_start = prev.start_byte
                         else:
                             break
-            anno_start_line = cb[:anno_start].count(b'\n')
+            anno_start_line = byte_to_line(line_offsets, anno_start)
 
             methods.append({
                 'name': name,
@@ -384,7 +401,7 @@ def _scan_method_records(filepath: str, cb: bytes, ext: str, *,
                                      and not has_annotation and not is_entry,
                 'package_name': package_name,
                 'module': module,
-                'source_set': _get_source_set(filepath),
+                'source_set': source_set,
                 'class_name': class_name,
                 'class_type': class_type,
                 'class_start': cls_start,
@@ -407,17 +424,21 @@ def _scan_method_records(filepath: str, cb: bytes, ext: str, *,
 # ── public API ──────────────────────────────────────────────
 
 def scan_method_definitions(filepath: str, cb: bytes, ext: str,
-                            *, module: str | None = None) -> list[dict]:
+                            *, module: str | None = None,
+                            root_node=None, line_offsets=None) -> list[dict]:
     """Scan *filepath* and return all concrete method definitions."""
-    return _scan_method_records(filepath, cb, ext, include_all=True, module=module)
+    return _scan_method_records(filepath, cb, ext, include_all=True, module=module,
+                                root_node=root_node, line_offsets=line_offsets)
 
 
 def scan_methods(filepath: str, cb: bytes, ext: str,
-                 *, module: str | None = None) -> list[dict]:
+                 *, module: str | None = None,
+                 root_node=None, line_offsets=None) -> list[dict]:
     """Scan *filepath* and return a list of dead-method info dicts.
 
     Each dict contains: name, kind, value, class_name, class_type,
     param_count, safe_to_inline, is_private, is_static, all_mods,
     decl_start, decl_end, start_byte, end_byte, filepath, module.
     """
-    return _scan_method_records(filepath, cb, ext, include_all=False, module=module)
+    return _scan_method_records(filepath, cb, ext, include_all=False, module=module,
+                                root_node=root_node, line_offsets=line_offsets)
