@@ -388,6 +388,12 @@ def _scan_method_records(filepath: str, cb: bytes, ext: str, *,
                         if prev.type in ('annotation', 'marker_annotation', 'attribute',
                                           'comment', 'block_comment', 'line_comment',
                                           'multiline_comment'):
+                            line_start = cb.rfind(b'\n', 0, prev.start_byte) + 1
+                            if cb[line_start:prev.start_byte].strip():
+                                # Trailing comments belong to the preceding
+                                # declaration and must never extend this
+                                # method's deletion range backwards.
+                                break
                             anno_start = prev.start_byte
                         else:
                             break
@@ -411,6 +417,7 @@ def _scan_method_records(filepath: str, cb: bytes, ext: str, *,
                 'is_private': is_private,
                 'is_static': is_static,
                 'all_mods': mods,
+                'has_annotation': has_annotation,
                 'decl_start': anno_start_line,
                 'decl_end': end_line,
                 'start_byte': anno_start,

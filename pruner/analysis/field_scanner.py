@@ -62,6 +62,18 @@ def _modifiers(node, cb: bytes) -> set[str]:
     return mods
 
 
+def _has_annotation(node) -> bool:
+    """Return whether a field declaration is annotation-managed."""
+    stack = list(node.children)
+    while stack:
+        child = stack.pop()
+        if child.type in ('annotation', 'marker_annotation', 'attribute'):
+            return True
+        if child.type in ('modifiers', 'modifier'):
+            stack.extend(child.children)
+    return False
+
+
 def _leading_doc_start(node, cb: bytes) -> int:
     """Include immediately preceding comments/annotations in the span."""
     start = node.start_byte
@@ -79,6 +91,13 @@ def _leading_doc_start(node, cb: bytes) -> int:
         if prev.type in ('annotation', 'marker_annotation', 'attribute',
                           'comment', 'block_comment', 'line_comment',
                           'multiline_comment'):
+            # A trailing comment belongs to the previous declaration, not
+            # the following field.  Binding it here shifts decl_start onto
+            # the live previous field and deleting the next unused field
+            # removes both (e.g. ``LIVE; // ...`` followed by ``DEAD;``).
+            line_start = cb.rfind(b'\n', 0, prev.start_byte) + 1
+            if cb[line_start:prev.start_byte].strip():
+                break
             start = prev.start_byte
         else:
             break
@@ -170,6 +189,7 @@ def scan_fields(filepath: str, cb: bytes, ext: str,
                 continue
 
             mods = _modifiers(node, cb)
+            has_annotation = _has_annotation(node)
             class_name, class_type = _enclosing_class(node, cb)
             if class_type == 'interface_declaration' and 'static' not in mods:
                 pass
@@ -186,6 +206,7 @@ def scan_fields(filepath: str, cb: bytes, ext: str,
                     'is_static': 'static' in mods or 'companion' in mods,
                     'is_final': bool(mods & {'final', 'const', 'val', 'let'}),
                     'all_mods': mods,
+                    'has_annotation': has_annotation,
                     'decl_start': byte_to_line(line_offsets, start),
                     'decl_end': byte_to_line(line_offsets, node.end_byte),
                     'start_byte': start,

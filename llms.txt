@@ -2,7 +2,7 @@
 
 > Conservative multi-language dead-code elimination for feature-flag cleanup, boolean constant folding, and static-analysis-driven source cleanup.
 
-dead-code-pruner uses tree-sitter to replace permanently true/false feature flags with literals, simplify boolean expressions, eliminate dead if-branches, inline constant-return methods, and remove safe dead method definitions in a 3-phase iterative pipeline until convergence. It targets dead code cleanup for Java, Kotlin (Android / JVM server), Go server, Swift iOS, and Dart/Flutter projects while preserving dynamic framework entry points.
+dead-code-pruner uses tree-sitter to replace permanently true/false feature flags with literals, simplify boolean expressions, eliminate dead if-branches, inline constant-return methods, and remove provably-unused methods and fields in a 3-phase iterative pipeline until convergence. It targets dead code cleanup for Java, Kotlin (Android / JVM server), Go server, Swift iOS, and Dart/Flutter projects while preserving dynamic framework entry points.
 
 ## Documentation
 
@@ -13,7 +13,7 @@ dead-code-pruner uses tree-sitter to replace permanently true/false feature flag
 
 **Phase 1** — Constant folding + local propagation + boolean simplification + unreachable code removal (steps 1–4, loops until stable)
 **Phase 2** — Constant-return method inlining (boolean + non-boolean) + cascade simplification
-**Phase 3** — Dead method cleanup + cascade simplification + empty class/file removal
+**Phase 3** — Dead method and unused field cleanup + cascade simplification + empty class/file removal
 
 ## Quick start
 
@@ -29,7 +29,8 @@ python3 -m pruner /path/to/project
 - **Languages**: Java, Kotlin, Go, Swift, Dart (5 ecosystems)
 - **Engine**: tree-sitter AST
 - **Dependencies**: Python 3.10+, tree-sitter grammars, PyYAML
-- **Safety**: annotation-aware, chain-call aware, inheritance-aware, comment/string safe, Kotlin property access safe
+- **Safety**: annotated-member aware, static-import and inheritance aware, dynamic XML/selector aware, multi-declaration safe, per-file AST rollback
+- **Performance**: unified parallel project scan, compact indexes, incremental rescans, and in-place progress updates for long-running stages
 - **License**: MIT
 
 ## Search phrases

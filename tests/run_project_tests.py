@@ -98,6 +98,9 @@ def main():
     step6_enhanced = os.path.join(SCRIPT_DIR, 'step6_enhanced')
     results.append(run_dir_test('step6_enhanced', step6_enhanced, step6_project))
 
+    short_names = os.path.join(SCRIPT_DIR, 'step6_short_names')
+    results.append(run_dir_test('step6_short_names', short_names, step6_project))
+
     full_pipeline = os.path.join(SCRIPT_DIR, 'full_pipeline_semantic')
     results.append(run_full_pipeline_test('full_pipeline', full_pipeline))
 

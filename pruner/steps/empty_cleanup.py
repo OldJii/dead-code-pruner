@@ -13,6 +13,7 @@ from ..ast_utils import parse, find_all, find_all_multi, txt, build_line_offsets
 from ..lang import _PARSERS, SKIP_DIRS
 from .. import ui
 from ..analysis.ref_index import build_ref_index
+from ..validation import validate_transformation
 
 _CLASS_NODE_TYPES = frozenset({
     'class_declaration', 'class_definition',
@@ -155,7 +156,9 @@ def step7_empty_cleanup(root_dir: str, dry_run: bool = False) -> dict:
                 all_files.append(os.path.join(dp, fn))
 
     empty_classes: list[tuple[str, str, int, int]] = []
-    for fp in all_files:
+    total_files = len(all_files)
+    for idx, fp in enumerate(all_files):
+        ui.progress(idx + 1, total_files, "Scanning for empty classes")
         ext = os.path.splitext(fp)[1].lower()
         try:
             with open(fp, 'rb') as f:
@@ -180,6 +183,7 @@ def step7_empty_cleanup(root_dir: str, dry_run: bool = False) -> dict:
                 start_line = byte_to_line(line_offsets, node.start_byte)
                 end_line = byte_to_line(line_offsets, node.end_byte)
                 empty_classes.append((fp, name, start_line, end_line))
+    ui.progress_done()
 
     if not empty_classes:
         ui.info("No empty classes found.")
@@ -192,7 +196,8 @@ def step7_empty_cleanup(root_dir: str, dry_run: bool = False) -> dict:
     class_ref_index: dict[str, set[str]] = {}
     cn_pat = re.compile(
         r'\b(' + '|'.join(re.escape(n) for n in class_names_needed) + r')\b')
-    for fp in all_files:
+    for idx, fp in enumerate(all_files):
+        ui.progress(idx + 1, total_files, "Indexing empty-class references")
         try:
             with open(fp, 'r', encoding='utf-8', errors='ignore') as f:
                 content = f.read()
@@ -200,17 +205,23 @@ def step7_empty_cleanup(root_dir: str, dry_run: bool = False) -> dict:
             continue
         for m in cn_pat.finditer(content):
             class_ref_index.setdefault(m.group(1), set()).add(fp)
+    ui.progress_done()
 
     classes_removed = 0
     files_to_check: set[str] = set()
 
     removable: list[tuple[str, str, int, int]] = []
-    for fp, class_name, start_line, end_line in empty_classes:
+    total_candidates = len(empty_classes)
+    for idx, (fp, class_name, start_line, end_line) in enumerate(empty_classes):
+        ui.progress(idx + 1, total_candidates,
+                    "Validating empty-class references",
+                    f"{len(removable)} removable")
         if _class_referenced_in_project(class_name, fp, all_files,
                                          start_line, end_line,
                                          ref_index=class_ref_index):
             continue
         removable.append((fp, class_name, start_line, end_line))
+    ui.progress_done()
 
     by_file: dict[str, list[tuple[str, int, int]]] = {}
     for fp, class_name, start_line, end_line in removable:
@@ -227,21 +238,32 @@ def step7_empty_cleanup(root_dir: str, dry_run: bool = False) -> dict:
             continue
 
         try:
-            with open(fp, 'r', encoding='utf-8') as f:
-                content = f.read()
+            with open(fp, 'rb') as f:
+                original_bytes = f.read()
+            content = original_bytes.decode('utf-8', errors='replace')
             lines = content.split('\n')
+            removed_here = 0
             for class_name, start_line, end_line in entries:
                 if start_line <= end_line < len(lines):
                     del lines[start_line:end_line + 1]
-                    classes_removed += 1
-                    ui.info(f"Removed: {class_name} {ui.dim(f'[{rel}]')}", indent=4)
+                    removed_here += 1
             while lines and lines[-1].strip() == '':
                 lines.pop()
             new_content = '\n'.join(lines)
             if new_content.strip():
                 new_content += '\n'
+            ext = os.path.splitext(fp)[1].lower()
+            validated = validate_transformation(
+                original_bytes, new_content.encode('utf-8'), ext)
+            if validated == original_bytes and new_content != content:
+                ui.warn(f"skipped empty-class cleanup in {rel} "
+                        f"(would introduce AST errors)", indent=4)
+                continue
             with open(fp, 'w', encoding='utf-8') as f:
-                f.write(new_content)
+                f.write(validated.decode('utf-8', errors='replace'))
+            classes_removed += removed_here
+            for class_name, _start, _end in entries:
+                ui.info(f"Removed: {class_name} {ui.dim(f'[{rel}]')}", indent=4)
             files_to_check.add(fp)
         except Exception as e:
             ui.warn(f"removing classes in {rel}: {e}", indent=4)

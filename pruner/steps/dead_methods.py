@@ -21,7 +21,10 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from .. import lang as _lang
 from .. import ui
 from ..analysis.project_scan import scan_project, semantic_method_key, ProjectScanResult
-from ..analysis.ref_index import clear_text_index_cache
+from ..analysis.ref_index import (
+    clear_text_index_cache, is_in_comment_or_string,
+    iter_dynamic_reference_names,
+)
 from ..analysis.class_hierarchy import enhance_safety
 from ..analysis.contracts import promote_unreferenced
 from ..analysis.code_edit import (
@@ -30,7 +33,7 @@ from ..analysis.code_edit import (
     delete_line_ranges, has_cross_file_refs,
     has_dynamic_symbol_ref, verify_no_dangling_calls,
 )
-from ..analysis.method_scanner import scan_methods
+from ..analysis.method_scanner import scan_method_definitions
 from ..analysis.field_scanner import scan_fields
 from ..validation import validate_transformation
 from ..steps.constant_fold import step1b_propagate_locals, step1c_remove_unused_bool_vars
@@ -40,6 +43,7 @@ from ..steps.if_blocks import step4_if_blocks
 from ..steps.unreachable import step1d_remove_unreachable
 
 _MIN_PARALLEL = 50
+_SIMPLIFY_FILES_PER_WORKER = 40
 
 
 def _simplify_files_worker(file_paths):
@@ -75,6 +79,7 @@ def _simplify_files_worker(file_paths):
                     f.write(cb)
         except Exception:
             pass
+    return len(file_paths)
 
 
 def _scan_field_refs_worker(args):
@@ -180,11 +185,17 @@ def step6_project(root_dir: str, dry_run: bool = False,
     ui.info(f"Promoted {enhanced} via contracts → safe={safe_count}  "
             f"{ui.dim(ui.fmt_elapsed(time.time()-t_safety))}")
 
-    unused_extra = _collect_unused_methods(scan, contracts, ref_index,
-                                            content_cache=content_cache)
+    t_unused = time.time()
+    ui.info("Analyzing non-constant static methods for unused definitions...")
+    unused_extra = _collect_unused_methods(
+        scan, contracts, ref_index, content_cache=content_cache,
+        type_ref_index=scan.type_ref_index,
+        dynamic_ref_index=scan.dynamic_ref_index)
     if unused_extra:
         ui.info(f"Unused non-constant methods: {len(unused_extra)}")
         all_dead.extend(unused_extra)
+    ui.info(f"Unused-method analysis complete  "
+            f"{ui.dim(ui.fmt_elapsed(time.time()-t_unused))}")
 
     if dry_run:
         for dm in all_dead:
@@ -197,8 +208,10 @@ def step6_project(root_dir: str, dry_run: bool = False,
         return len(all_dead), set()
 
     t_pre = time.time()
-    _promote_unreferenced(all_dead, ref_index, contracts,
-                          content_cache=content_cache)
+    _promote_unreferenced(
+        all_dead, ref_index, contracts, content_cache=content_cache,
+        type_ref_index=scan.type_ref_index,
+        dynamic_ref_index=scan.dynamic_ref_index)
     safe_count = sum(1 for d in all_dead if d['safe_to_inline'])
     ui.info(f"Pre-check complete: safe={safe_count}  "
             f"{ui.dim(ui.fmt_elapsed(time.time()-t_pre))}")
@@ -234,6 +247,8 @@ def step6_project(root_dir: str, dry_run: bool = False,
                     if os.path.abspath(ref_file) != src_abs:
                         cross_file_edits.append((ref_file, dm))
 
+        total_edit_files = len(same_file_edits)
+        edited_files_done = 0
         for src, methods in same_file_edits.items():
             try:
                 with open(src, 'r', encoding='utf-8') as f:
@@ -268,10 +283,17 @@ def step6_project(root_dir: str, dry_run: bool = False,
                         round_processed += cnt
             except Exception as e:
                 ui.warn(f"{src}: {e}", indent=4)
+            edited_files_done += 1
+            ui.progress(edited_files_done, max(1, total_edit_files),
+                        "Rewriting local call sites", indent=4)
+        if total_edit_files:
+            ui.progress_done()
 
         by_ref: dict[str, list[dict]] = {}
         for ref_file, dm in cross_file_edits:
             by_ref.setdefault(ref_file, []).append(dm)
+        total_ref_files = len(by_ref)
+        ref_files_done = 0
         for ref_file, methods in by_ref.items():
             try:
                 with open(ref_file, 'r', encoding='utf-8') as f:
@@ -306,6 +328,11 @@ def step6_project(root_dir: str, dry_run: bool = False,
                         round_processed += cnt
             except Exception as e:
                 ui.warn(f"{ref_file}: {e}", indent=4)
+            ref_files_done += 1
+            ui.progress(ref_files_done, max(1, total_ref_files),
+                        "Rewriting external call sites", indent=4)
+        if total_ref_files:
+            ui.progress_done()
 
         files_modified |= round_modified
         total_processed += round_processed
@@ -314,20 +341,40 @@ def step6_project(root_dir: str, dry_run: bool = False,
             ui.info(f"Simplifying {len(round_modified)} modified files...", indent=4)
             mod_list = sorted(round_modified)
             n_workers = min(os.cpu_count() or 1,
-                            max(1, len(mod_list) // _MIN_PARALLEL))
+                            max(1, (len(mod_list) + _SIMPLIFY_FILES_PER_WORKER - 1)
+                                // _SIMPLIFY_FILES_PER_WORKER))
             if n_workers > 1 and len(mod_list) >= _MIN_PARALLEL:
-                chunk_sz = max(1, (len(mod_list) + n_workers - 1) // n_workers)
+                target_chunks = min(len(mod_list), n_workers * 4)
+                chunk_sz = max(1, (len(mod_list) + target_chunks - 1)
+                               // target_chunks)
                 chunks = [mod_list[i:i + chunk_sz]
                           for i in range(0, len(mod_list), chunk_sz)]
                 try:
                     with ProcessPoolExecutor(max_workers=n_workers) as ex:
-                        list(ex.map(_simplify_files_worker, chunks))
+                        futures = {ex.submit(_simplify_files_worker, chunk): len(chunk)
+                                   for chunk in chunks}
+                        completed = 0
+                        for future in as_completed(futures):
+                            future.result()
+                            completed += futures[future]
+                            ui.progress(completed, len(mod_list),
+                                        "Simplifying", indent=4)
+                    ui.progress_done()
                 except Exception:
-                    for fp in mod_list:
+                    ui.progress_done()
+                    ui.warn("Parallel simplification failed; retrying sequentially",
+                            indent=4)
+                    for idx, fp in enumerate(mod_list):
                         _simplify_single(fp)
+                        ui.progress(idx + 1, len(mod_list),
+                                    "Simplifying", indent=4)
+                    ui.progress_done()
             else:
-                for fp in mod_list:
+                for idx, fp in enumerate(mod_list):
                     _simplify_single(fp)
+                    ui.progress(idx + 1, len(mod_list),
+                                "Simplifying", indent=4)
+                ui.progress_done()
 
         ui.info(f"Round {iteration+1}: {round_processed} call sites, "
                 f"{len(round_modified)} files modified", indent=4)
@@ -352,8 +399,7 @@ def step6_project(root_dir: str, dry_run: bool = False,
                     content = f.read()
                 content_cache[fp] = content
                 for name in iter_reference_names(content):
-                    if len(name) > 2:
-                        ref_index.setdefault(name, set()).add(fp)
+                    ref_index.setdefault(name, set()).add(fp)
             except Exception:
                 pass
     clear_text_index_cache()
@@ -373,28 +419,38 @@ def step6_project(root_dir: str, dry_run: bool = False,
             with open(fp, 'rb') as f:
                 cb = f.read()
             ext = os.path.splitext(fp)[1].lower()
-            current_methods = scan_methods(fp, cb, ext)
+            # Include non-constant method definitions as Phase 4 also
+            # deletes records classified as ``unused``.
+            current_methods = scan_method_definitions(fp, cb, ext)
             content = cb.decode('utf-8', errors='replace')
             ranges = []
+            matched_methods: list[dict] = []
+            available = list(current_methods)
             for dm in methods:
-                matched = None
-                for cm in current_methods:
+                compatible = []
+                for cm in available:
                     if cm['name'] != dm['name']:
                         continue
+                    if cm.get('class_name') != dm.get('class_name'):
+                        continue
+                    if cm.get('param_count', 0) != dm.get('param_count', 0):
+                        continue
                     if dm.get('kind') == 'unused':
-                        matched = cm
-                        break
+                        compatible.append(cm)
+                        continue
                     if cm.get('kind') != dm.get('kind'):
                         continue
                     if (cm['kind'] in ('boolean', 'constant', 'null_return')
                             and cm.get('value') != dm.get('value')):
                         continue
-                    matched = cm
-                    break
-                if matched is None and dm.get('kind') == 'unused':
-                    matched = dm
+                    compatible.append(cm)
+                matched = min(
+                    compatible,
+                    key=lambda cm: abs(cm['decl_start'] - dm['decl_start']),
+                    default=None)
                 if matched is None:
                     continue
+                available.remove(matched)
 
                 if _has_same_file_refs(dm, matched, content):
                     continue
@@ -404,26 +460,30 @@ def step6_project(root_dir: str, dry_run: bool = False,
                         dm, ref_index, src_abs,
                         scan.children_map, scan.iface_abstract,
                         polymorphic=poly,
-                        content_cache=content_cache):
+                        content_cache=content_cache,
+                        type_ref_index=scan.type_ref_index,
+                        dynamic_ref_index=scan.dynamic_ref_index):
                     continue
                 if contracts.is_contract_method(dm.get('class_name'), dm['name']):
                     continue
                 ranges.append((matched['decl_start'], matched['decl_end']))
+                matched_methods.append(matched)
 
             if ranges:
                 new_content, cnt = delete_line_ranges(content, ranges)
                 if cnt > 0:
-                    deleted_names = set()
-                    for start, _end in ranges:
-                        for dm in methods:
-                            if dm['decl_start'] == start:
-                                deleted_names.add(dm['name'])
+                    deleted_names = {m['name'] for m in matched_methods}
                     dangling = verify_no_dangling_calls(new_content, deleted_names)
                     if dangling:
                         ui.warn(f"skipped deletion in "
                                f"{os.path.relpath(fp, root_dir)} "
                                f"(dangling refs: {dangling})", indent=4)
                     else:
+                        validated = validate_transformation(
+                            cb, new_content.encode('utf-8'), ext)
+                        new_content = validated.decode(
+                            'utf-8', errors='replace')
+                    if not dangling and new_content != content:
                         with open(fp, 'w', encoding='utf-8') as f:
                             f.write(new_content)
                         files_modified.add(fp)
@@ -447,6 +507,8 @@ def step6_project(root_dir: str, dry_run: bool = False,
 
 def _collect_unused_methods(scan, contracts, ref_index,
                             content_cache: dict[str, str] | None = None,
+                            type_ref_index: dict[str, set[str]] | None = None,
+                            dynamic_ref_index: dict[str, set[str]] | None = None,
                             ) -> list[dict]:
     """Find unused *static* methods with non-constant bodies.
 
@@ -470,6 +532,8 @@ def _collect_unused_methods(scan, contracts, ref_index,
             continue
         if m.get('class_type') in ('interface_declaration', 'enum_declaration'):
             continue
+        if m.get('has_annotation'):
+            continue
         if not m.get('is_static'):
             continue
         mods = m.get('all_mods', set()) or set()
@@ -482,29 +546,24 @@ def _collect_unused_methods(scan, contracts, ref_index,
         candidates.append(m)
 
     extra: list[dict] = []
-    files_read: dict[str, str] = {}
-    for m in candidates:
+    same_file_live = _batch_same_file_refs(
+        candidates, content_cache, label="Checking local unused-method refs")
+    for idx, m in enumerate(candidates):
+        if (idx + 1) % 100 == 0 or idx + 1 == len(candidates):
+            ui.progress(idx + 1, len(candidates),
+                        "Checking cross-file method refs",
+                        f"{len(extra)} unused", indent=4)
         fp = m['filepath']
-        content = (content_cache or {}).get(fp)
-        if content is None:
-            content = files_read.get(fp)
-        if content is None:
-            try:
-                with open(fp, 'r', encoding='utf-8', errors='ignore') as f:
-                    content = f.read()
-                files_read[fp] = content
-            except Exception:
-                continue
-        if _has_same_file_refs_direct(
-                m['name'], m.get('param_count', 0),
-                content, m['decl_start'], m['decl_end']):
+        if _method_key(m) in same_file_live:
             continue
         src_abs = os.path.abspath(fp)
         poly = contracts.has_polymorphic_targets(m.get('class_name'))
         if has_cross_file_refs(m, ref_index, src_abs,
                                scan.children_map, scan.iface_abstract,
                                polymorphic=poly,
-                               content_cache=content_cache):
+                               content_cache=content_cache,
+                               type_ref_index=type_ref_index,
+                               dynamic_ref_index=dynamic_ref_index):
             continue
 
         rec = dict(m)
@@ -513,6 +572,8 @@ def _collect_unused_methods(scan, contracts, ref_index,
         rec['safe_to_inline'] = True
         rec['is_dead_candidate'] = True
         extra.append(rec)
+    if candidates:
+        ui.progress_done()
     return extra
 
 
@@ -564,6 +625,8 @@ def _cleanup_unused_fields(scan: ProjectScanResult,
     candidate_fields: list[dict] = []
     candidate_names: set[str] = set()
     for f in fresh_fields:
+        if f.get('has_annotation'):
+            continue
         if not f.get('is_final'):
             continue
         if not (f.get('is_private') or f.get('is_static')):
@@ -585,7 +648,9 @@ def _cleanup_unused_fields(scan: ProjectScanResult,
     n_workers = min(os.cpu_count() or 1,
                     max(1, len(all_file_list) // _MIN_PARALLEL))
     if n_workers > 1 and len(all_file_list) >= _MIN_PARALLEL:
-        chunk_sz = max(1, (len(all_file_list) + n_workers - 1) // n_workers)
+        target_chunks = min(len(all_file_list), n_workers * 8)
+        chunk_sz = max(1, (len(all_file_list) + target_chunks - 1)
+                       // target_chunks)
         chunks = [all_file_list[i:i + chunk_sz]
                   for i in range(0, len(all_file_list), chunk_sz)]
         cand_list = list(candidate_names)
@@ -593,25 +658,38 @@ def _cleanup_unused_fields(scan: ProjectScanResult,
             with ProcessPoolExecutor(max_workers=n_workers) as ex:
                 futs = {ex.submit(_scan_field_refs_worker, (c, cand_list)): c
                         for c in chunks}
+                completed = 0
                 for fut in as_completed(futs):
                     for name, fps in fut.result().items():
                         field_refs[name].update(fps)
+                    completed += len(futs[fut])
+                    ui.progress(completed, len(all_file_list),
+                                "Scanning field references")
+            ui.progress_done()
         except Exception:
-            for fp in all_file_list:
+            ui.progress_done()
+            ui.warn("Parallel field-reference scan failed; retrying sequentially")
+            for idx, fp in enumerate(all_file_list):
+                ui.progress(idx + 1, len(all_file_list),
+                            "Scanning field references")
                 content = _read_current(fp, files_modified, scan)
                 if content is None:
                     continue
                 for word in _WORD_PAT.findall(content):
                     if word in candidate_names_frozen:
                         field_refs[word].add(fp)
+            ui.progress_done()
     else:
-        for fp in all_file_list:
+        for idx, fp in enumerate(all_file_list):
+            ui.progress(idx + 1, len(all_file_list),
+                        "Scanning field references")
             content = _read_current(fp, files_modified, scan)
             if content is None:
                 continue
             for word in _WORD_PAT.findall(content):
                 if word in candidate_names_frozen:
                     field_refs[word].add(fp)
+        ui.progress_done()
 
     # Group candidates by file for batched same-file ref checking.
     candidates_by_file: dict[str, list[dict]] = {}
@@ -623,8 +701,9 @@ def _cleanup_unused_fields(scan: ProjectScanResult,
             continue
         candidates_by_file.setdefault(f['filepath'], []).append(f)
 
-    by_file: dict[str, list] = {}
-    for fp, fields in candidates_by_file.items():
+    unused_fields: list[dict] = []
+    total_candidate_files = len(candidates_by_file)
+    for idx, (fp, fields) in enumerate(candidates_by_file.items()):
         content = _read_current(fp, files_modified, scan)
         if content is None:
             continue
@@ -632,18 +711,53 @@ def _cleanup_unused_fields(scan: ProjectScanResult,
         for f in fields:
             if not _field_has_same_file_refs_lines(f['name'], lines,
                                                     f['decl_start'], f['decl_end']):
-                by_file.setdefault(fp, []).append(f)
+                unused_fields.append(f)
+        ui.progress(idx + 1, total_candidate_files,
+                    "Validating field candidates",
+                    f"{len(unused_fields)} unused")
+    if total_candidate_files:
+        ui.progress_done()
+
+    # A single declaration can define multiple fields (``A = 1, B = 2``).
+    # Its line range may be deleted only when every field in that declaration
+    # is eligible and unused.  Deleting the range for just B would also remove
+    # a live A and leave dangling references.
+    def field_key(field: dict) -> tuple:
+        return (field['filepath'], field['decl_start'], field['decl_end'],
+                field['name'])
+
+    all_by_declaration: dict[tuple, list[dict]] = defaultdict(list)
+    for field in fresh_fields:
+        decl_key = (field['filepath'], field['decl_start'], field['decl_end'])
+        all_by_declaration[decl_key].append(field)
+    eligible_keys = {field_key(field) for field in candidate_fields}
+    unused_keys = {field_key(field) for field in unused_fields}
+
+    by_file: dict[str, list[dict]] = defaultdict(list)
+    for decl_key, declared_fields in all_by_declaration.items():
+        keys = {field_key(field) for field in declared_fields}
+        if keys and keys <= eligible_keys and keys <= unused_keys:
+            by_file[decl_key[0]].append(declared_fields[0])
 
     deleted = 0
     for fp, fields in by_file.items():
         try:
-            with open(fp, 'r', encoding='utf-8') as fh:
-                content = fh.read()
+            with open(fp, 'rb') as fh:
+                original_bytes = fh.read()
+            content = original_bytes.decode('utf-8', errors='replace')
             ranges = [(f['decl_start'], f['decl_end']) for f in fields]
             new_content, cnt = delete_line_ranges(content, ranges)
             if cnt > 0 and new_content != content:
+                ext = os.path.splitext(fp)[1].lower()
+                validated = validate_transformation(
+                    original_bytes, new_content.encode('utf-8'), ext)
+                if validated == original_bytes:
+                    ui.warn(
+                        f"skipped field deletion in {fp} "
+                        f"(would introduce AST errors)", indent=4)
+                    continue
                 with open(fp, 'w', encoding='utf-8') as fh:
-                    fh.write(new_content)
+                    fh.write(validated.decode('utf-8', errors='replace'))
                 files_modified.add(fp)
                 deleted += cnt
         except Exception as e:
@@ -673,29 +787,21 @@ def _field_has_same_file_refs_lines(name: str, lines: list[str],
     return False
 
 
-def _promote_unreferenced(all_dead, ref_index, contracts,
-                          content_cache: dict[str, str] | None = None):
+def _promote_unreferenced(
+        all_dead, ref_index, contracts,
+        content_cache: dict[str, str] | None = None,
+        type_ref_index: dict[str, set[str]] | None = None,
+        dynamic_ref_index: dict[str, set[str]] | None = None):
     candidates = [dm for dm in all_dead if not dm.get('safe_to_inline')]
+    same_file_live = _batch_same_file_refs(
+        candidates, content_cache, label="Checking local promotion refs")
     promoted = 0
-    files_read: dict[str, str] = {}
     for i, dm in enumerate(candidates):
         if (i + 1) % 200 == 0:
             ui.progress(i + 1, len(candidates), "Pre-checking",
                         f"{promoted} promoted", indent=4)
         fp = dm['filepath']
-        content = (content_cache or {}).get(fp)
-        if content is None:
-            content = files_read.get(fp)
-        if content is None:
-            try:
-                with open(fp, 'r', encoding='utf-8', errors='ignore') as f:
-                    content = f.read()
-                files_read[fp] = content
-            except Exception:
-                continue
-        has_ref = _has_same_file_refs_direct(
-            dm['name'], dm.get('param_count', 0),
-            content, dm['decl_start'], dm['decl_end'])
+        has_ref = _method_key(dm) in same_file_live
 
         if not has_ref:
             src_abs = os.path.abspath(fp)
@@ -704,7 +810,9 @@ def _promote_unreferenced(all_dead, ref_index, contracts,
                     dm, ref_index, src_abs,
                     contracts.children_map, contracts.iface_abstract,
                     polymorphic=poly,
-                    content_cache=content_cache):
+                    content_cache=content_cache,
+                    type_ref_index=type_ref_index,
+                    dynamic_ref_index=dynamic_ref_index):
                 has_ref = True
 
         if promote_unreferenced(dm, contracts, has_ref):
@@ -735,6 +843,69 @@ def _has_same_file_refs_direct(method_name: str, param_count: int,
                 or has_dynamic_symbol_ref(line, method_name)):
             return True
     return False
+
+
+_ANY_CALL_PAT = re.compile(r'(?<!\w)([A-Za-z_]\w*)\s*\(')
+_ANY_METHOD_REF_PAT = re.compile(r'::([A-Za-z_]\w*)\b')
+
+
+def _batch_same_file_refs(
+        candidates: list[dict],
+        content_cache: dict[str, str] | None = None,
+        *, label: str = "Checking local references") -> set[tuple]:
+    """Return candidate keys referenced outside their declaration spans.
+
+    Each source file is scanned once regardless of how many candidate
+    methods it declares.  The previous implementation split and searched
+    a large file once per candidate, which became quadratic for controller
+    and utility classes with hundreds of methods.
+    """
+    by_file: dict[str, list[dict]] = defaultdict(list)
+    for candidate in candidates:
+        by_file[candidate['filepath']].append(candidate)
+
+    live: set[tuple] = set()
+    total_files = len(by_file)
+    for idx, (fp, methods) in enumerate(by_file.items()):
+        content = (content_cache or {}).get(fp)
+        if content is None:
+            try:
+                with open(fp, 'r', encoding='utf-8', errors='ignore') as fh:
+                    content = fh.read()
+            except Exception:
+                ui.progress(idx + 1, total_files, label,
+                            f"{len(live)} referenced", indent=4)
+                continue
+
+        wanted = {m['name'] for m in methods}
+        call_lines: dict[str, set[int]] = defaultdict(set)
+        offset = 0
+        for line_no, line in enumerate(content.splitlines(keepends=True)):
+            for pattern in (_ANY_CALL_PAT, _ANY_METHOD_REF_PAT):
+                for match in pattern.finditer(line):
+                    name = match.group(1)
+                    if name not in wanted:
+                        continue
+                    if is_in_comment_or_string(content, offset + match.start()):
+                        continue
+                    call_lines[name].add(line_no)
+            offset += len(line)
+
+        for method in methods:
+            start, end = method['decl_start'], method['decl_end']
+            if any(line_no < start or line_no > end
+                   for line_no in call_lines.get(method['name'], ())):
+                live.add(_method_key(method))
+        dynamic_names = set(iter_dynamic_reference_names(content))
+        if dynamic_names:
+            for method in methods:
+                if method['name'] in dynamic_names:
+                    live.add(_method_key(method))
+        ui.progress(idx + 1, total_files, label,
+                    f"{len(live)} referenced", indent=4)
+    if total_files:
+        ui.progress_done()
+    return live
 
 
 def _has_same_file_refs(dm: dict, cm: dict, content: str) -> bool:

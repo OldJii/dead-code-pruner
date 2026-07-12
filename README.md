@@ -2,7 +2,7 @@
 
 Conservative multi-language dead-code elimination powered by tree-sitter.
 
-dead-code-pruner is a static analysis and source cleanup tool for removing dead code after feature flag cleanup, boolean constant folding, and compile-time configuration changes. Give it a constant mapping and it folds configured flags, simplifies boolean/control-flow expressions, eliminates dead branches, inlines constant-return methods, removes safe dead methods, and protects dynamic framework entry points through iterative project-level analysis.
+dead-code-pruner is a static analysis and source cleanup tool for removing dead code after feature flag cleanup, boolean constant folding, and compile-time configuration changes. Give it a constant mapping and it folds configured flags, simplifies boolean/control-flow expressions, eliminates dead branches, inlines constant-return methods, removes provably-unused methods and fields, and protects dynamic framework entry points through iterative project-level analysis.
 
 Built on [tree-sitter](https://tree-sitter.github.io/) for format-agnostic, comment-safe, multi-language analysis.
 
@@ -27,7 +27,7 @@ The tool runs a **3-phase + cleanup pipeline** that loops until no more changes 
 |-------|-------|---------|
 | **1** | Constant fold → local propagation → bool simplify → compound bool → if-block eliminate → unreachable removal → unused var cleanup | Replace flags and simplify control flow |
 | **2** | Inline constant-return methods → cascade simplify | Remove `return true/false/null/"str"/42` helpers |
-| **3** | Dead method cleanup → cascade simplify | Remove empty void methods and orphaned definitions |
+| **3** | Dead method and unused field cleanup → cascade simplify | Remove empty methods, orphaned definitions, and safely-unreferenced fields |
 | **Cleanup** | Empty class detection → reference check → removal | Remove classes left empty after method deletion |
 
 Each phase can trigger new simplification opportunities in earlier steps — the pipeline converges automatically.
@@ -80,13 +80,15 @@ Each phase can trigger new simplification opportunities in earlier steps — the
 
 Supported constant return types: `boolean`, `int`, `long`, `float`, `double`, `String`, `null`/`nil`, negative numeric literals.
 
-### Phase 3: Dead Method Cleanup
+### Phase 3: Dead Member Cleanup
 
 | Transformation | Description |
 |---|---|
 | Empty void method removal | `private void doNothing() {}` → call sites removed, definition deleted |
 | Orphaned constant method removal | Methods returning constants (`true`/`false`/`null`/`42`/`"text"`) with no remaining callers |
 | Cross-file call-site removal | Same as above but across multiple files in the project |
+| Unused field removal | Unreferenced fields are removed only after project-wide reference and safety checks |
+| Multi-variable declaration safety | `int used, unused;` is kept unless every declarator can be removed safely |
 | Cascade simplification | After removals, Phase 1 re-runs to simplify any affected control flow |
 
 ### Cleanup: Empty Class & File Removal
@@ -105,14 +107,16 @@ The tool is **conservative by design** — when in doubt, code is kept.
 
 | Category | Examples | Reason |
 |---|---|---|
-| **Annotated methods** | `@Override`, `@Bean`, `@Test`, `@objc`, `@IBAction`, `@Composable` | Annotations indicate framework management |
+| **Annotated members** | `@Override`, `@Bean`, `@LongLinkObs`, `@objc`, `@IBAction`, `@Composable` | Methods and fields may be generated, injected, or framework-managed |
 | **Abstract / interface methods** | `abstract void process();` | Part of a contract |
 | **Override methods** | `override fun onResume()` | Called by framework, not user code |
 | **Native methods** | `native void jni_call();` | JNI/FFI binding |
 | **Framework lifecycle methods** | `onCreate`, `viewDidLoad`, `build`, `main`, `init`, `ServeHTTP` | Language adapter protects them by name |
 | **Go exported functions** | `func HandleRequest(...)` (uppercase) | Part of public API |
 | **Dart private naming** | `_helper()` is treated as file-private but not force-deleted | Only deleted when provably unreferenced |
-| **Dynamic references** | `#selector(doAction)`, `selector="tapHandler"` | Storyboard/XIB references are scanned |
+| **Dynamic references** | `#selector(doAction)`, `android:onClick`, XML `action`/`selector` attributes | Layout, Storyboard, and generated callback references are scanned |
+| **Static and inherited calls** | Java/Kotlin static imports and calls through subclasses | Project indexes resolve imported and transitively inherited members |
+| **Short symbol names** | Methods such as `d()`, `e()`, or `bs()` | Short names participate in the same reference checks as other symbols |
 | **Methods with parameters** | Any method requiring arguments | Not supported for inlining (no argument analysis) |
 | **Public methods with callers** | Referenced from other files or via reflection | Cross-file reference analysis prevents deletion |
 | **Multi-variant methods** | Same name returns different values in different source sets | Source-set conflict detection skips them |
@@ -233,9 +237,12 @@ pruner/
 │   └── empty_cleanup.py    Step 7: empty class & file cleanup
 └── analysis/           Project-level analysis
     ├── method_scanner.py     AST method detection (adapter-aware)
+    ├── field_scanner.py      Conservative unused-field detection
+    ├── contracts.py          Shared analysis result contracts
     ├── project_scan.py       Unified single-pass project scan
     ├── project_layout.py     Multi-module project detection
     ├── ref_index.py          Cross-file reference index
+    ├── text_index.py         Compact textual and dynamic-reference index
     ├── class_hierarchy.py    Inheritance analysis
     └── code_edit.py          Call-site replacement & deletion
 ```
@@ -244,15 +251,27 @@ pruner/
 
 - **AST-precise**: tree-sitter precisely distinguishes code from comments and strings
 - **AST validation gate**: every transformation is validated — changes that introduce new parse errors are automatically rolled back
+- **Per-file rollback**: project-level method, field, and empty-class edits are parsed again before being committed to disk
 - **Language adapters**: each ecosystem has dedicated entry-point and visibility rules (lifecycle methods, annotations, naming conventions)
-- **Annotation-safe**: any method with `@Annotation` is never deleted (framework/DI/AOP managed)
+- **Annotation-safe**: annotated methods and fields are never deleted (framework/DI/AOP/generated-code managed)
 - **Chain-call aware**: instance methods called via `obj.field.method()` are detected via cross-file reference analysis
-- **Inheritance-aware**: skips abstract, interface, and framework base-class methods
+- **Inheritance-aware**: skips abstract, interface, and framework base-class methods, and resolves inherited static calls transitively
+- **Import-aware**: Java and Kotlin static imports are indexed before removing member declarations
+- **Dynamic-resource aware**: Android XML callbacks/actions and Apple selector references protect their source declarations
 - **Overload-safe**: parameter count matching prevents confusing overloaded methods
+- **Declaration-safe**: comments cannot bind to the following declaration, and multi-variable fields are removed atomically
+- **Java switch-safe**: shared switch-scope declarations are preserved or hoisted when a constant branch exits early
 - **Dangling reference check**: methods are only deleted after verifying no remaining call sites exist
 - **Module-aware**: multi-module projects (Gradle, Go, Dart) track methods per module to avoid cross-module name collision
 - **Quality gate**: pipeline summary reports rejected file edits and line change statistics
 - **Conservative by design**: when in doubt, the method is kept
+
+## Performance and Progress
+
+- Project sources are parsed through a unified scan and compact reference indexes, avoiding repeated whole-project work.
+- CPU-heavy scans use parallel workers on sufficiently large projects, while incremental rounds only revisit changed files.
+- Long-running stages continuously update one in-place terminal progress line. Completed stages end that line before normal logs continue, so redirected and interactive output remain readable.
+- A representative 19,668-file Android project improved from roughly 53 minutes to 12–15 minutes for a full cleanup run. Actual time depends on hardware, filesystem cache, and the number of convergence rounds.
 
 ## Requirements
 
@@ -263,13 +282,13 @@ pruner/
 
 ```bash
 python3 tests/run_tests.py           # 5-language step 1–4 tests
-python3 tests/run_project_tests.py   # step 5 & 6 project-level tests
+python3 tests/run_project_tests.py   # 10 project-level safety and cleanup suites
 ```
 
 ## Limitations
 
 - Local constant propagation is limited to immutable boolean declarations (`final boolean`, `val`, `let`, `final bool`)
-- Dead method detection is conservative — annotated, public, or potentially-referenced methods are preserved
+- Dead member detection is conservative — annotated, public, generated, dynamically referenced, or otherwise ambiguous declarations are preserved
 - Only single-return-statement methods are inlined (no multi-statement constant-return analysis)
 - Does not analyse method parameters for side effects
 - Empty class removal requires no cross-file references (enum types are always preserved)

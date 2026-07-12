@@ -11,7 +11,17 @@ import os
 import sys
 import time
 
-_NO_COLOR = os.environ.get('NO_COLOR') is not None or not sys.stdout.isatty()
+_IS_TTY = sys.stdout.isatty()
+_NO_COLOR = os.environ.get('NO_COLOR') is not None or not _IS_TTY
+_progress_active = False
+
+
+def _before_message():
+    """Finish an in-place progress line before regular output."""
+    global _progress_active
+    if _progress_active:
+        print()
+        _progress_active = False
 
 
 class _C:
@@ -40,6 +50,7 @@ def fmt_elapsed(seconds: float) -> str:
 
 
 def banner(title: str, width: int = 62):
+    _before_message()
     bar = '━' * width
     print(f"\n{_C.B_CYAN}{bar}{_C.RESET}")
     print(f"  {_C.BOLD}{title}{_C.RESET}")
@@ -47,37 +58,44 @@ def banner(title: str, width: int = 62):
 
 
 def section(title: str):
+    _before_message()
     print(f"\n{_C.CYAN}{'─' * 50}{_C.RESET}")
     print(f"  {_C.BOLD}{title}{_C.RESET}")
     print(f"{_C.CYAN}{'─' * 50}{_C.RESET}")
 
 
 def phase_header(phase: int, label: str, round_num: int):
+    _before_message()
     print(f"\n{_C.DIM}───{_C.RESET} Phase {phase} · round {round_num}: "
           f"{_C.CYAN}{label}{_C.RESET} {_C.DIM}───{_C.RESET}")
 
 
 def kv(key: str, value, indent: int = 2):
+    _before_message()
     pad = ' ' * indent
     print(f"{pad}{_C.DIM}{key}:{_C.RESET}  {value}")
 
 
 def info(msg: str, indent: int = 2):
+    _before_message()
     pad = ' ' * indent
     print(f"{pad}{msg}")
 
 
 def success(msg: str, indent: int = 2):
+    _before_message()
     pad = ' ' * indent
     print(f"{pad}{_C.B_GREEN}✔{_C.RESET} {msg}")
 
 
 def warn(msg: str, indent: int = 2):
+    _before_message()
     pad = ' ' * indent
     print(f"{pad}{_C.B_YELLOW}⚠{_C.RESET} {msg}")
 
 
 def error(msg: str, indent: int = 2):
+    _before_message()
     pad = ' ' * indent
     print(f"{pad}{_C.B_RED}✖{_C.RESET} {msg}", file=sys.stderr)
 
@@ -108,8 +126,13 @@ def cyan(msg: str) -> str:
 
 def progress(current: int, total: int, label: str = '', extra: str = '',
              indent: int = 2):
+    global _progress_active
     pad = ' ' * indent
     pct = current * 100 // total if total else 0
+    # Tiny operations finish faster than a human can read intermediate
+    # states; one final line is clearer and avoids visual noise.
+    if total < 20 and current < total:
+        return
     bar_width = 20
     filled = bar_width * current // total if total else 0
     bar = '█' * filled + '░' * (bar_width - filled)
@@ -119,16 +142,21 @@ def progress(current: int, total: int, label: str = '', extra: str = '',
     if extra:
         parts.append(f"  {extra}")
     print(''.join(parts), end='', flush=True)
+    _progress_active = True
 
 
 def progress_done():
-    print()
+    global _progress_active
+    if _progress_active:
+        print()
+    _progress_active = False
 
 
 def summary_table(rows: list[tuple[str, str]], indent: int = 2):
     """Print aligned key-value rows with dimmed separators."""
     if not rows:
         return
+    _before_message()
     max_key = max(len(k) for k, _ in rows)
     pad = ' ' * indent
     for key, val in rows:

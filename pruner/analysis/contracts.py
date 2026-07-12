@@ -306,6 +306,12 @@ def is_safe_to_remove(record: dict, graph: ContractGraph,
     cls = record.get('class_name')
     mods = record.get('all_mods', set()) or set()
 
+    # Annotated methods are framework/reflection entry points even when no
+    # source-level call exists (Lua bridges, DI providers, event handlers,
+    # serialization hooks, and similar APIs).
+    if record.get('has_annotation'):
+        return False
+
     if 'abstract' in mods or 'native' in mods or 'open' in mods:
         return False
     if 'override' in mods or 'Override' in mods:
@@ -340,6 +346,8 @@ def promote_unreferenced(record: dict, graph: ContractGraph,
     implementors whose method name matches a known contract symbol.
     """
     if has_any_ref:
+        return False
+    if record.get('has_annotation'):
         return False
     if record.get('class_type') == 'enum_declaration':
         return False

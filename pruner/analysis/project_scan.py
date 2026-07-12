@@ -21,7 +21,10 @@ from .. import ui
 from ..ast_utils import parse, build_line_offsets
 from .method_scanner import scan_method_definitions
 from .field_scanner import scan_fields
-from .ref_index import REFERENCE_EXTS, iter_reference_names
+from .ref_index import (
+    REFERENCE_EXTS, iter_dynamic_reference_names, iter_reference_names,
+    iter_type_identifiers,
+)
 from .project_layout import ProjectLayout
 from .contracts import ContractGraph
 
@@ -32,11 +35,13 @@ def _scan_file_chunk(file_infos):
     """Process a chunk of files in a worker process.
 
     *file_infos* is a list of ``(filepath, ext, module_name)`` tuples.
-    Returns ``(methods, fields, ref_index, contracts, content_cache)``.
+    Returns method/field data plus call, type, and dynamic-reference indices.
     """
     methods = []
     fields_list = []
     ref_index: dict[str, set[str]] = defaultdict(set)
+    type_ref_index: dict[str, set[str]] = defaultdict(set)
+    dynamic_ref_index: dict[str, set[str]] = defaultdict(set)
     contracts = ContractGraph()
     content_cache: dict[str, str] = {}
 
@@ -67,12 +72,16 @@ def _scan_file_chunk(file_infos):
                         root_node=root_node, line_offsets=line_offsets))
 
         for name in iter_reference_names(content):
-            if len(name) > 2:
-                ref_index[name].add(fp)
+            ref_index[name].add(fp)
+        for name in iter_type_identifiers(content):
+            type_ref_index[name].add(fp)
+        for name in iter_dynamic_reference_names(content):
+            dynamic_ref_index[name].add(fp)
 
         contracts.ingest_file(content)
 
-    return methods, fields_list, dict(ref_index), contracts, content_cache
+    return (methods, fields_list, dict(ref_index), dict(type_ref_index),
+            dict(dynamic_ref_index), contracts, content_cache)
 
 
 # ── Result container ────────────────────────────────────────────
@@ -82,7 +91,8 @@ class ProjectScanResult:
 
     __slots__ = (
         'all_files', 'ref_files', 'dead_methods', 'all_methods', 'fields',
-        'variant_conflicts', 'ref_index',
+        'variant_conflicts', 'ref_index', 'type_ref_index',
+        'dynamic_ref_index',
         'children_map', 'final_classes', 'iface_abstract',
         'implements', 'contracts', 'layout', 'elapsed',
         'content_cache',
@@ -96,6 +106,8 @@ class ProjectScanResult:
         self.fields: list[dict] = []
         self.variant_conflicts: set[tuple] = set()
         self.ref_index: dict[str, set[str]] = defaultdict(set)
+        self.type_ref_index: dict[str, set[str]] = defaultdict(set)
+        self.dynamic_ref_index: dict[str, set[str]] = defaultdict(set)
         self.children_map: dict[str, set[str]] = defaultdict(set)
         self.final_classes: set[str] = set()
         self.iface_abstract: set[str] = set()
@@ -113,6 +125,7 @@ class ProjectScanResult:
         Avoids a full re-read of the entire project for subsequent rounds.
         """
         t0 = time.time()
+        ui.info(f"Incremental scan: preparing {len(modified_files)} modified files...")
         modified_abs = {os.path.abspath(fp) for fp in modified_files}
 
         self.all_methods = [m for m in self.all_methods
@@ -126,6 +139,10 @@ class ProjectScanResult:
         # instead of O(ref_index_size × modified_files) nested loop.
         modified_set = set(modified_files)
         for name_set in self.ref_index.values():
+            name_set -= modified_set
+        for name_set in self.type_ref_index.values():
+            name_set -= modified_set
+        for name_set in self.dynamic_ref_index.values():
             name_set -= modified_set
         for fp in modified_files:
             self.content_cache.pop(fp, None)
@@ -146,31 +163,57 @@ class ProjectScanResult:
                 mod_name = self.layout.get_module(fp) if self.layout else None
                 file_infos.append((fp, ext, mod_name))
 
+        # Incremental rounds contain far fewer files than the initial scan,
+        # but each file still pays full tree-sitter/method/field/contract
+        # analysis cost.  The old 500-file threshold forced typical
+        # 38–223-file rounds onto one core (22s–2m12s in the real project).
         n_workers = min(os.cpu_count() or 1,
-                        max(1, len(file_infos) // 200))
-        if n_workers > 1 and len(file_infos) >= _MIN_FILES_FOR_PARALLEL:
-            chunk_sz = max(1, (len(file_infos) + n_workers - 1) // n_workers)
+                        max(1, (len(file_infos) + _INCREMENTAL_FILES_PER_WORKER - 1)
+                            // _INCREMENTAL_FILES_PER_WORKER))
+        if (n_workers > 1
+                and len(file_infos) >= _MIN_INCREMENTAL_FILES_FOR_PARALLEL):
+            target_chunks = min(len(file_infos), n_workers * 4)
+            chunk_sz = max(1, (len(file_infos) + target_chunks - 1) // target_chunks)
             chunks = [file_infos[i:i + chunk_sz]
                       for i in range(0, len(file_infos), chunk_sz)]
             try:
+                partials = []
+                completed = 0
                 with ProcessPoolExecutor(max_workers=n_workers) as executor:
-                    for future in as_completed(
-                            {executor.submit(_scan_file_chunk, c): c
-                             for c in chunks}):
-                        methods, fields, ref_idx, contracts, cc = future.result()
-                        for m in methods:
-                            self.all_methods.append(m)
-                            if m.get('is_dead_candidate'):
-                                self.dead_methods.append(m)
-                        self.fields.extend(fields)
-                        for name, fps in ref_idx.items():
-                            self.ref_index[name].update(fps)
-                        self.contracts.merge(contracts)
-                        self.content_cache.update(cc)
+                    futures = {executor.submit(_scan_file_chunk, c): len(c)
+                               for c in chunks}
+                    for future in as_completed(futures):
+                        partials.append(future.result())
+                        completed += futures[future]
+                        ui.progress(completed, len(file_infos),
+                                    "Incremental scanning")
+                ui.progress_done()
+                ui.info("Merging incremental analysis indices...")
+                # Merge only after every worker succeeded.  If one worker
+                # fails, the sequential fallback must not duplicate records
+                # already merged from completed workers.
+                for partial in partials:
+                    (methods, fields, ref_idx, type_idx, dynamic_idx,
+                     contracts, cc) = partial
+                    for m in methods:
+                        self.all_methods.append(m)
+                        if m.get('is_dead_candidate'):
+                            self.dead_methods.append(m)
+                    self.fields.extend(fields)
+                    for name, fps in ref_idx.items():
+                        self.ref_index[name].update(fps)
+                    for name, fps in type_idx.items():
+                        self.type_ref_index[name].update(fps)
+                    for name, fps in dynamic_idx.items():
+                        self.dynamic_ref_index[name].update(fps)
+                    self.contracts.merge(contracts)
+                    self.content_cache.update(cc)
             except Exception:
-                self._update_files_sequential(file_infos)
+                ui.progress_done()
+                ui.warn("Parallel incremental scan failed; retrying sequentially")
+                self._update_files_sequential(file_infos, show_progress=True)
         else:
-            self._update_files_sequential(file_infos)
+            self._update_files_sequential(file_infos, show_progress=True)
 
         self._recompute_variants()
         self._sync_contract_mirrors()
@@ -178,9 +221,12 @@ class ProjectScanResult:
         ui.info(f"Incremental update: {len(file_infos)} files re-scanned  "
                 f"{ui.dim(ui.fmt_elapsed(dt))}")
 
-    def _update_files_sequential(self, file_infos: list) -> None:
+    def _update_files_sequential(self, file_infos: list,
+                                 *, show_progress: bool = False) -> None:
         """Sequential fallback for update_files re-scanning."""
-        for fp, ext, mod_name in file_infos:
+        total = len(file_infos)
+        interval = max(1, total // 20)
+        for idx, (fp, ext, mod_name) in enumerate(file_infos):
             try:
                 with open(fp, 'rb') as f:
                     cb = f.read()
@@ -202,9 +248,16 @@ class ProjectScanResult:
                 scan_fields(fp, cb, ext, module=mod_name,
                             root_node=root_node, line_offsets=line_offsets))
             for name in iter_reference_names(content):
-                if len(name) > 2:
-                    self.ref_index[name].add(fp)
+                self.ref_index[name].add(fp)
+            for name in iter_type_identifiers(content):
+                self.type_ref_index[name].add(fp)
+            for name in iter_dynamic_reference_names(content):
+                self.dynamic_ref_index[name].add(fp)
             self.contracts.ingest_file(content)
+            if show_progress and ((idx + 1) % interval == 0 or idx + 1 == total):
+                ui.progress(idx + 1, total, "Incremental scanning")
+        if show_progress:
+            ui.progress_done()
 
     def _recompute_variants(self) -> None:
         method_defs_by_key: dict[tuple, list[dict]] = defaultdict(list)
@@ -239,11 +292,14 @@ def _scan_parallel(result: ProjectScanResult, file_infos: list,
                    n_workers: int) -> None:
     """Scatter file chunks across workers and merge results."""
     total = len(file_infos)
-    chunk_size = max(1, (total + n_workers - 1) // n_workers)
+    # More chunks than workers keep all cores fed and provide frequent
+    # progress updates instead of one update per 12.5% worker-sized chunk.
+    target_chunks = min(total, n_workers * 8)
+    chunk_size = max(1, (total + target_chunks - 1) // target_chunks)
     chunks = [file_infos[i:i + chunk_size]
               for i in range(0, total, chunk_size)]
 
-    ui.info(f"Parallel scan: {n_workers} workers, {len(chunks)} chunks")
+    ui.info(f"Parallel scan: {n_workers} workers, {len(chunks)} progress chunks")
 
     dead_count = 0
     completed_files = 0
@@ -253,7 +309,8 @@ def _scan_parallel(result: ProjectScanResult, file_infos: list,
                    for chunk in chunks}
         for future in as_completed(futures):
             chunk_len = futures[future]
-            methods, fields, ref_idx, contracts, content_cache = future.result()
+            (methods, fields, ref_idx, type_idx, dynamic_idx,
+             contracts, content_cache) = future.result()
 
             for m in methods:
                 result.all_methods.append(m)
@@ -265,6 +322,10 @@ def _scan_parallel(result: ProjectScanResult, file_infos: list,
 
             for name, fps in ref_idx.items():
                 result.ref_index[name].update(fps)
+            for name, fps in type_idx.items():
+                result.type_ref_index[name].update(fps)
+            for name, fps in dynamic_idx.items():
+                result.dynamic_ref_index[name].update(fps)
 
             result.contracts.merge(contracts)
             result.content_cache.update(content_cache)
@@ -317,8 +378,11 @@ def _scan_sequential(result: ProjectScanResult, file_infos: list,
                         root_node=root_node, line_offsets=line_offsets))
 
         for name in iter_reference_names(content):
-            if len(name) > 2:
-                result.ref_index[name].add(fp)
+            result.ref_index[name].add(fp)
+        for name in iter_type_identifiers(content):
+            result.type_ref_index[name].add(fp)
+        for name in iter_dynamic_reference_names(content):
+            result.dynamic_ref_index[name].add(fp)
 
         result.contracts.ingest_file(content)
 
@@ -347,6 +411,8 @@ def _compute_variant_conflicts(result: ProjectScanResult) -> None:
 # ── Public API ──────────────────────────────────────────────────
 
 _MIN_FILES_FOR_PARALLEL = 500
+_MIN_INCREMENTAL_FILES_FOR_PARALLEL = 25
+_INCREMENTAL_FILES_PER_WORKER = 20
 
 
 def scan_project(root_dir: str, *, progress_interval: int = 500) -> ProjectScanResult:
@@ -395,11 +461,16 @@ def scan_project(root_dir: str, *, progress_interval: int = 500) -> ProjectScanR
             result.dead_methods.clear()
             result.fields.clear()
             result.ref_index.clear()
+            result.type_ref_index.clear()
+            result.dynamic_ref_index.clear()
             result.contracts = ContractGraph()
             result.content_cache.clear()
             _scan_sequential(result, file_infos, progress_interval)
     else:
         _scan_sequential(result, file_infos, progress_interval)
+
+    ui.progress_done()
+    ui.info("Finalizing reference, variant, and hierarchy indices...")
 
     # Reference-only files (storyboards, XML, JSON, etc.)
     source_set = set(result.all_files)
@@ -413,14 +484,16 @@ def scan_project(root_dir: str, *, progress_interval: int = 500) -> ProjectScanR
             continue
         result.content_cache[fp] = content
         for name in iter_reference_names(content):
-            if len(name) > 2:
-                result.ref_index[name].add(fp)
+            result.ref_index[name].add(fp)
+        for name in iter_type_identifiers(content):
+            result.type_ref_index[name].add(fp)
+        for name in iter_dynamic_reference_names(content):
+            result.dynamic_ref_index[name].add(fp)
 
     _compute_variant_conflicts(result)
     result._sync_contract_mirrors()
 
     result.elapsed = time.time() - t0
-    ui.progress_done()
     dead_count = len(result.dead_methods)
     ui.info(f"Scan complete: {dead_count} dead methods, "
             f"{len(result.children_map)} class hierarchies  "

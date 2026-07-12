@@ -5,7 +5,7 @@ boolean, inlining the live branch and deleting dead code after early exits.
 """
 
 import re
-from ..ast_utils import parse, find_if_nodes, get_if_parts, is_bool, bstr
+from ..ast_utils import parse, find_all, find_if_nodes, get_if_parts, is_bool, bstr
 
 _BLOCK_TYPES = frozenset({'block', 'statement_block', 'compound_statement'})
 
@@ -152,6 +152,76 @@ def _find_dead_end_b(cb, start_pos):
     return -1
 
 
+def _cross_case_declarations(cb: bytes, start: int, boundary: int,
+                             indent: bytes) -> bytes:
+    """Build declarations that must survive trimming to the next case.
+
+    Java switch statement groups share one lexical scope.  A declaration
+    after an early-returning branch in one case can still be assigned/read by
+    a later case.  When that now-unreachable region is removed, preserve such
+    declarations (without their unreachable initializers) before the return.
+    """
+    boundary_line_end = cb.find(b'\n', boundary)
+    if boundary_line_end < 0:
+        boundary_line_end = len(cb)
+    boundary_text = cb[boundary:boundary_line_end].lstrip()
+    if not (boundary_text.startswith(b'case ') or
+            boundary_text.startswith(b'default')):
+        return b''
+
+    root, _ = parse(cb)
+    declarations = [
+        node for node in find_all(root, 'local_variable_declaration')
+        if start <= node.start_byte and node.end_byte <= boundary
+    ]
+    if not declarations:
+        return b''
+
+    preserved: list[bytes] = []
+    for declaration in declarations:
+        type_node = declaration.child_by_field_name('type')
+        if type_node is None:
+            continue
+        type_text = cb[type_node.start_byte:type_node.end_byte].strip()
+        if not type_text or type_text == b'var':
+            continue
+
+        switch_block = declaration.parent
+        while switch_block is not None and switch_block.type != 'switch_block':
+            switch_block = switch_block.parent
+        scope_end = switch_block.end_byte if switch_block is not None else len(cb)
+
+        for declarator in find_all(declaration, 'variable_declarator'):
+            name_node = declarator.child_by_field_name('name')
+            if name_node is None:
+                continue
+            name = cb[name_node.start_byte:name_node.end_byte]
+            later_nodes = [
+                node for node in find_all(root, 'identifier')
+                if boundary <= node.start_byte < scope_end
+                and cb[node.start_byte:node.end_byte] == name
+            ]
+            if not later_nodes:
+                continue
+            first = min(later_nodes, key=lambda node: node.start_byte)
+            parent = first.parent
+            is_redeclaration = (
+                parent is not None
+                and parent.type == 'variable_declarator'
+                and parent.child_by_field_name('name') is not None
+                and parent.child_by_field_name('name').id == first.id
+            )
+            if not is_redeclaration:
+                dimensions = b''.join(
+                    cb[child.start_byte:child.end_byte]
+                    for child in declarator.children
+                    if child.type == 'dimensions'
+                )
+                preserved.append(
+                    indent + type_text + dimensions + b' ' + name + b';')
+    return b'\n'.join(preserved)
+
+
 def _replace_and_trim_dead(cb, ls, rep, construct_end, exit_body):
     """Replace the if-construct at [ls..construct_end) with *rep*.
 
@@ -166,7 +236,11 @@ def _replace_and_trim_dead(cb, ls, rep, construct_end, exit_body):
             if between:
                 scope_start = cb.rfind(b'\n', 0, dead_end)
                 scope_start = scope_start + 1 if scope_start >= 0 else dead_end
-                return cb[:ls] + rep + b'\n' + cb[scope_start:]
+                indent = cb[ls:ls + len(cb[ls:]) - len(cb[ls:].lstrip(b' \t'))]
+                declarations = _cross_case_declarations(
+                    cb, construct_end, scope_start, indent)
+                prefix = declarations + b'\n' if declarations else b''
+                return cb[:ls] + prefix + rep + b'\n' + cb[scope_start:]
     return cb[:ls] + rep + b'\n' + cb[construct_end:]
 
 

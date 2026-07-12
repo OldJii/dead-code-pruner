@@ -111,7 +111,9 @@ def step5_project(root_dir: str, dry_run: bool = False) -> tuple[int, set[str]]:
     for m in all_methods:
         by_src[m['filepath']].append(m)
 
-    for src, src_methods in by_src.items():
+    total_src = len(by_src)
+    for idx, (src, src_methods) in enumerate(by_src.items()):
+        ui.progress(idx + 1, total_src, "Inlining local call sites", indent=4)
         try:
             with open(src, 'r', encoding='utf-8') as f:
                 content = f.read()
@@ -140,6 +142,8 @@ def step5_project(root_dir: str, dry_run: bool = False) -> tuple[int, set[str]]:
                     total_inlined += cnt
         except Exception as e:
             ui.warn(f"same-file {src}: {e}")
+    if total_src:
+        ui.progress_done()
 
     # Cross-file inlining: group by ref_file to read each once.
     cross_edits: dict[str, list[dict]] = defaultdict(list)
@@ -150,7 +154,9 @@ def step5_project(root_dir: str, dry_run: bool = False) -> tuple[int, set[str]]:
                 if os.path.abspath(rf) != src_abs:
                     cross_edits[rf].append(m)
 
-    for ref_file, methods in cross_edits.items():
+    total_cross = len(cross_edits)
+    for idx, (ref_file, methods) in enumerate(cross_edits.items()):
+        ui.progress(idx + 1, total_cross, "Inlining external call sites", indent=4)
         try:
             with open(ref_file, 'r', encoding='utf-8') as f:
                 content = f.read()
@@ -177,6 +183,8 @@ def step5_project(root_dir: str, dry_run: bool = False) -> tuple[int, set[str]]:
                     total_inlined += cnt
         except Exception as e:
             ui.warn(f"cross-file {ref_file}: {e}")
+    if total_cross:
+        ui.progress_done()
 
     deleted = 0
     by_file: dict[str, list] = defaultdict(list)
@@ -184,7 +192,10 @@ def step5_project(root_dir: str, dry_run: bool = False) -> tuple[int, set[str]]:
         if m['is_private']:
             by_file[m['filepath']].append(m)
 
-    for fp, methods in by_file.items():
+    total_delete_files = len(by_file)
+    for idx, (fp, methods) in enumerate(by_file.items()):
+        ui.progress(idx + 1, total_delete_files,
+                    "Deleting inlined definitions", indent=4)
         try:
             with open(fp, 'rb') as f:
                 cb = f.read()
@@ -226,11 +237,12 @@ def step5_project(root_dir: str, dry_run: bool = False) -> tuple[int, set[str]]:
                         deleted += del_cnt
         except Exception as e:
             ui.warn(f"delete {fp}: {e}")
+    if total_delete_files:
+        ui.progress_done()
 
     ui.info(f"Inlined {ui.bold(str(total_inlined))} call sites, "
             f"deleted {deleted} definitions")
     ui.info(f"Modified {len(files_modified)} files  "
             f"{ui.dim(ui.fmt_elapsed(time.time()-t0))}")
     return total_inlined, files_modified
-
 

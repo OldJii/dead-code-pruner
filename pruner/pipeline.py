@@ -79,7 +79,14 @@ def _process_files_worker(args):
 def _run_quality_gate_rollback(target: str) -> int:
     """Roll back files whose AST error count increased after transformation."""
     rolled = 0
-    for fp, orig_bytes in list(_file_snapshots.items()):
+    items = list(_file_snapshots.items())
+    total = len(items)
+    ui.info(f"Validating AST quality across {total} snapshots...")
+    interval = max(1, total // 100)
+    for idx, (fp, orig_bytes) in enumerate(items):
+        if (idx + 1) % interval == 0 or idx + 1 == total:
+            ui.progress(idx + 1, total, "AST quality gate",
+                        f"{rolled} rejected")
         try:
             with open(fp, 'rb') as f:
                 cur_bytes = f.read()
@@ -100,6 +107,7 @@ def _run_quality_gate_rollback(target: str) -> int:
                     ui.warn(f"ROLLBACK (new AST errors): {rel}")
                 except Exception:
                     pass
+    ui.progress_done()
     return rolled
 
 
@@ -167,7 +175,8 @@ def _run_steps_1_4(target: str, replacements: list, dry_run: bool,
         if n_workers > 1 and total >= _MIN_PARALLEL and not dry_run:
             for fp in all_targets:
                 _snapshot_file(fp)
-            chunk_size = max(1, (total + n_workers - 1) // n_workers)
+            target_chunks = min(total, n_workers * 8)
+            chunk_size = max(1, (total + target_chunks - 1) // target_chunks)
             chunks = [all_targets[i:i + chunk_size]
                       for i in range(0, total, chunk_size)]
             completed = 0
@@ -187,6 +196,7 @@ def _run_steps_1_4(target: str, replacements: list, dry_run: bool,
                         completed += futures[future]
                         ui.progress(completed, total, label, f"{cnt} changed")
             except Exception as e:
+                ui.progress_done()
                 ui.warn(f"Parallel step1-4 failed ({e}), falling back")
                 cnt = 0
                 changed_paths.clear()
@@ -276,12 +286,21 @@ def run_phase_1(target: str, replacements: list, dry_run: bool) -> tuple[int, fl
 # ── Phase 2 ───────────────────────────────────────────────────
 
 def _snapshot_all_sources(target: str):
+    source_files: list[str] = []
     for dp, dns, fns in os.walk(target):
         dns[:] = [d for d in dns if d not in SKIP_DIRS]
         for fn in fns:
             ext = os.path.splitext(fn)[1].lower()
             if ext in SUPPORTED_EXTS:
-                _snapshot_file(os.path.join(dp, fn))
+                source_files.append(os.path.join(dp, fn))
+    total = len(source_files)
+    ui.info(f"Capturing safety snapshots for {total} source files...")
+    interval = max(1, total // 100)
+    for idx, fp in enumerate(source_files):
+        _snapshot_file(fp)
+        if (idx + 1) % interval == 0 or idx + 1 == total:
+            ui.progress(idx + 1, total, "Snapshotting")
+    ui.progress_done()
 
 
 def run_phase_2(target: str, replacements: list, dry_run: bool) -> tuple[int, float]:
@@ -448,7 +467,13 @@ def run_full_pipeline(
         post_rollback = _run_quality_gate_rollback(target)
         rejected_count += post_rollback
 
-        for fp, orig_bytes in _file_snapshots.items():
+        snapshot_items = list(_file_snapshots.items())
+        total_snapshots = len(snapshot_items)
+        ui.info(f"Final quality/statistics pass over {total_snapshots} snapshots...")
+        interval = max(1, total_snapshots // 100)
+        for idx, (fp, orig_bytes) in enumerate(snapshot_items):
+            if (idx + 1) % interval == 0 or idx + 1 == total_snapshots:
+                ui.progress(idx + 1, total_snapshots, "Quality/statistics")
             try:
                 with open(fp, 'rb') as f:
                     cur_bytes = f.read()
@@ -462,6 +487,7 @@ def run_full_pipeline(
             orig_set, cur_set = set(orig_lines), set(cur_lines)
             lines_added   += len(cur_set - orig_set)
             lines_removed += len(orig_set - cur_set)
+        ui.progress_done()
 
     _file_snapshots.clear()
 

@@ -894,3 +894,20 @@ public class TestAllCases {
     }
   }
 }
+
+// ============================================================
+// Group 26: Java switch cases share declaration scope
+// ============================================================
+
+String case26_switchShared(int kind) {
+  switch (kind) {
+    case 1:
+      String content;
+      return "production";
+    case 2:
+      content = "later case";
+      return content;
+    default:
+      return "default";
+  }
+}

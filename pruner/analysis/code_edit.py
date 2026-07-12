@@ -20,6 +20,7 @@ def has_dynamic_symbol_ref(content: str, method_name: str) -> bool:
         r'#selector\s*\([^)]*\b' + selector + r'\b',
         r'\bselector="' + selector + r'\b',
         r'\baction="' + selector + r'\b',
+        r'\b(?:android:)?onClick="' + selector + r'\b',
     )
     return any(re.search(p, content) for p in patterns)
 
@@ -173,7 +174,10 @@ def delete_line_ranges(content: str, ranges: list[tuple[int, int]]) -> tuple[str
         return content, 0
     lines = content.split('\n')
     deleted = 0
-    for start, end in sorted(ranges, reverse=True):
+    # Duplicate ranges are possible when several stale candidate records
+    # resolve to the same current declaration.  Applying the same deletion
+    # twice would remove the declaration *and then unrelated following code*.
+    for start, end in sorted(set(ranges), reverse=True):
         if 0 <= start <= end < len(lines):
             safe_start = start
             while safe_start <= end:
@@ -325,7 +329,10 @@ def has_cross_file_refs(dm: dict, ref_index: dict, src_abs: str,
                         iface_abstract: set | None = None,
                         *,
                         polymorphic: bool | None = None,
-                        content_cache: dict[str, str] | None = None) -> bool:
+                        content_cache: dict[str, str] | None = None,
+                        type_ref_index: dict[str, set[str]] | None = None,
+                        dynamic_ref_index: dict[str, set[str]] | None = None,
+                        ) -> bool:
     """Return ``True`` if method *dm* has cross-file references.
 
     When *content_cache* ``{filepath: content_str}`` is provided, file
@@ -363,6 +370,74 @@ def has_cross_file_refs(dm: dict, ref_index: dict, src_abs: str,
     ref_files = set(ref_index.get(name, set()))
     if check_property and prop_name != name:
         ref_files |= ref_index.get(prop_name, set())
+
+    # The unified scanner builds two compact secondary indices.  They turn
+    # the overwhelmingly common checks into C-level set operations instead
+    # of re-running regex/string scans for every candidate method.
+    can_use_secondary_indices = (
+        type_ref_index is not None
+        and dynamic_ref_index is not None
+        # Lowercase/non-conventional type names are intentionally absent
+        # from the compact type index; use the exact legacy scan for them.
+        and (not cls or cls in type_ref_index)
+    )
+    if can_use_secondary_indices:
+        external_refs = {rf for rf in ref_files
+                         if os.path.abspath(rf) != src_abs}
+        if not external_refs:
+            return False
+
+        dynamic_files = set(dynamic_ref_index.get(name, set()))
+        if check_property and prop_name != name:
+            dynamic_files |= dynamic_ref_index.get(prop_name, set())
+        if external_refs & dynamic_files:
+            return True
+
+        # XML/storyboard selectors are external framework references even
+        # when no declaring class name is present beside the symbol.
+        if any(_is_reference_file(rf) for rf in external_refs):
+            return True
+
+        if cls:
+            contextual_files = set(type_ref_index.get(cls, set()))
+            # Static methods are inherited and may be called bare from any
+            # descendant.  Expand the declaring type through the known
+            # hierarchy so ``Child : Middle`` can safely call a method
+            # declared on ``Base`` without spelling ``Base.method``.
+            if is_static and children_map:
+                pending = list(children_map.get(cls, ()))
+                seen = set(pending)
+                while pending:
+                    child = pending.pop()
+                    contextual_files |= type_ref_index.get(child, set())
+                    for descendant in children_map.get(child, ()):
+                        if descendant not in seen:
+                            seen.add(descendant)
+                            pending.append(descendant)
+            if external_refs & contextual_files:
+                return True
+
+        # Polymorphic calls can be made through an interface/base-typed
+        # receiver without mentioning the concrete class.  Treat any
+        # external call-index hit as live; false positives only retain code.
+        if is_instance and has_hierarchy:
+            return True
+
+        if check_property:
+            # Property syntax omits the method parentheses, so inspect only
+            # the already narrowed external files.  This path is uncommon;
+            # keeping it exact avoids retaining unrelated same-name getters.
+            for rf in external_refs:
+                rc = content_cache.get(rf) if content_cache else None
+                if rc is None:
+                    try:
+                        with open(rf, 'r', encoding='utf-8', errors='ignore') as fh:
+                            rc = fh.read()
+                    except Exception:
+                        continue
+                if _has_kotlin_property_ref(rc, name):
+                    return True
+        return False
 
     for rf in ref_files:
         if os.path.abspath(rf) == src_abs:

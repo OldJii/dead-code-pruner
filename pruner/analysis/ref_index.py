@@ -20,7 +20,13 @@ _REF_PAT = re.compile(r'::(\w+)\b')
 _SWIFT_SELECTOR_PAT = re.compile(
     r'#selector\s*\(\s*(?:getter:\s*|setter:\s*)?(?:(?:\w+)\.)?(\w+)\b')
 _IB_SELECTOR_PAT = re.compile(r'\bselector="([A-Za-z_]\w*)')
+_XML_CALLBACK_PAT = re.compile(
+    r'\b(?:action|android:onClick|onClick)="([A-Za-z_]\w*)')
 _DOT_PROPERTY_PAT = re.compile(r'\.([a-z]\w*)\b(?!\s*\()')
+_TYPE_IDENTIFIER_PAT = re.compile(r'\b([A-Z][A-Za-z0-9_]*)\b')
+_IMPORT_SYMBOL_PAT = re.compile(
+    r'(?m)^\s*import\s+(?:static\s+)?[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*'
+    r'\.([A-Za-z_]\w*)\s*;?\s*$')
 
 # Content-keyed cache.  Do NOT key by id(content) alone — CPython reuses
 # object ids after GC, which would return a stale TextIndex for a new string.
@@ -62,8 +68,42 @@ def iter_reference_names(content: str):
     if 'selector="' in content:
         for m in _IB_SELECTOR_PAT.finditer(content):
             yield m.group(1)
+    if 'action="' in content or 'onClick="' in content:
+        for m in _XML_CALLBACK_PAT.finditer(content):
+            yield m.group(1)
     if '.' in content:
         for m in _DOT_PROPERTY_PAT.finditer(content):
+            yield m.group(1)
+    if 'import ' in content:
+        # An unused static/Kotlin import still has to resolve at compile
+        # time.  Index the imported terminal symbol even when no call
+        # remains after constant folding.
+        for m in _IMPORT_SYMBOL_PAT.finditer(content):
+            yield m.group(1)
+
+
+def iter_type_identifiers(content: str):
+    """Yield conventional type identifiers used for contextual call lookup.
+
+    Java, Kotlin, Swift, Dart, and exported Go types conventionally start
+    with an uppercase letter.  Keeping this small secondary index lets the
+    dead-method safety pass answer ``TypeName.method()`` questions with set
+    intersections instead of repeatedly scanning whole files.
+    """
+    for m in _TYPE_IDENTIFIER_PAT.finditer(content):
+        yield m.group(1)
+
+
+def iter_dynamic_reference_names(content: str):
+    """Yield selector/action names referenced by framework metadata."""
+    if '#selector' in content:
+        for m in _SWIFT_SELECTOR_PAT.finditer(content):
+            yield m.group(1)
+    if 'selector="' in content:
+        for m in _IB_SELECTOR_PAT.finditer(content):
+            yield m.group(1)
+    if 'action="' in content or 'onClick="' in content:
+        for m in _XML_CALLBACK_PAT.finditer(content):
             yield m.group(1)
 
 
@@ -88,8 +128,10 @@ def build_ref_index(all_files: list[str], *, quiet: bool = False,
             except Exception:
                 continue
         for name in iter_reference_names(content):
-            if len(name) > 2:
-                index[name].add(fp)
+            # Short method names are common in logging and compatibility
+            # APIs (for example d/e/bs).  Dropping them makes live methods
+            # look unreferenced and is therefore never safe.
+            index[name].add(fp)
     if not quiet and total > 100:
         ui.progress_done()
     return index
