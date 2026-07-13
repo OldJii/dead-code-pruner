@@ -5,9 +5,9 @@ class Case21 {
 
     public void test1() {
         // 场景: 最后一个条件变成 false，应移除该行和注释
-        if (!hasPrivilege()
+        if (!hasChoice()
             && freeRemaining() <= 0
-            // PayWall二期优化，不再弹购买弹框
+            // Restriction二期优化，不再弹购买弹框
             && !false) {
             showDialog();
             return false;
@@ -16,9 +16,9 @@ class Case21 {
 
     public void test2() {
         // 场景: 最后一个条件变成 true，&& true 应消除
-        if (hasPrivilege()
+        if (hasChoice()
             || freeRemaining() > 0
-            // PayWall二期优化
+            // Restriction二期优化
             || false) {
             showFeature();
         }

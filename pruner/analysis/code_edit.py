@@ -330,6 +330,7 @@ def has_cross_file_refs(dm: dict, ref_index: dict, src_abs: str,
                         *,
                         polymorphic: bool | None = None,
                         content_cache: dict[str, str] | None = None,
+                        member_ref_index: dict[str, set[str]] | None = None,
                         type_ref_index: dict[str, set[str]] | None = None,
                         dynamic_ref_index: dict[str, set[str]] | None = None,
                         ) -> bool:
@@ -346,7 +347,10 @@ def has_cross_file_refs(dm: dict, ref_index: dict, src_abs: str,
          (subclasses, interface implements, abstract type), bare calls are
          accepted without requiring the concrete class name — covering
          casts like ``((Iface) x).method()``.
-      4. Kotlin property: ``.isXxx`` / ``.xxx`` (for ``getXxx``) property
+      4. Receiver: ``factory().methodName(`` / ``value.methodName(`` for
+         public instance methods whose receiver type is inferred rather than
+         written in the caller.
+      5. Kotlin property: ``.isXxx`` / ``.xxx`` (for ``getXxx``) property
          access without parentheses — Java/Kotlin interop.
     """
     name = dm['name']
@@ -393,11 +397,6 @@ def has_cross_file_refs(dm: dict, ref_index: dict, src_abs: str,
         if external_refs & dynamic_files:
             return True
 
-        # XML/storyboard selectors are external framework references even
-        # when no declaring class name is present beside the symbol.
-        if any(_is_reference_file(rf) for rf in external_refs):
-            return True
-
         if cls:
             contextual_files = set(type_ref_index.get(cls, set()))
             # Static methods are inherited and may be called bare from any
@@ -415,6 +414,18 @@ def has_cross_file_refs(dm: dict, ref_index: dict, src_abs: str,
                             seen.add(descendant)
                             pending.append(descendant)
             if external_refs & contextual_files:
+                return True
+
+        # A public instance method may be invoked through a factory return,
+        # fluent chain, inferred local type, or dependency-injection result,
+        # none of which has to spell the declaring type in the caller.  A
+        # distinct ``.method(...)`` index preserves those receiver calls
+        # without treating unrelated bare same-name functions as references.
+        if is_instance and member_ref_index is not None:
+            member_files = set(member_ref_index.get(name, set()))
+            if check_property and prop_name != name:
+                member_files |= member_ref_index.get(prop_name, set())
+            if external_refs & member_files:
                 return True
 
         # Polymorphic calls can be made through an interface/base-typed

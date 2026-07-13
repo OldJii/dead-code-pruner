@@ -4,7 +4,7 @@
 
 void case1_1() {
   if (BuildConfig.IS_PRODUCTION) {
-    doIntl();
+    doPrimary();
   }
 }
 
@@ -19,7 +19,7 @@ bool case1_3() {
 }
 
 void case1_4() {
-  var s = BuildConfig.IS_PRODUCTION ? "intl" : "local";
+  var s = BuildConfig.IS_PRODUCTION ? "primary" : "secondary";
   print(s);
 }
 
@@ -56,12 +56,12 @@ void case2_4() {
 // ============================================================
 
 void case3_1() {
-  var x = BuildConfig.IS_PRODUCTION ? "intl" : "local";
+  var x = BuildConfig.IS_PRODUCTION ? "primary" : "secondary";
   print(x);
 }
 
 void case3_2() {
-  var x = !BuildConfig.IS_PRODUCTION ? "local" : "intl";
+  var x = !BuildConfig.IS_PRODUCTION ? "secondary" : "primary";
   print(x);
 }
 
@@ -117,7 +117,7 @@ void case5_2() {
 
 void case5_3() {
   if (BuildConfig.IS_PRODUCTION) {
-    doIntl();
+    doPrimary();
   } else {
     doLocal();
   }
@@ -183,12 +183,12 @@ void case8_3() { var a = true; var b = false; }
 // ============================================================
 
 void case9_1() {
-  if (signUpType == "cosmos") {
+  if (flowMode == "special") {
     doComplex();
   } else if (BuildConfig.IS_PRODUCTION) {
     toEarlyUid();
   } else {
-    toSignUp();
+    continueFlow();
   }
 }
 
@@ -210,7 +210,7 @@ void case10_1() { if (true && someCondition()) { doSomething(); } }
 void case10_2() { var b = isChinese() && true; }
 void case10_3() { if (false || someCondition()) { doSomething(); } }
 void case10_4() { var b = someCondition() || false; }
-void case10_5() { var s = BuildConfig.IS_PRODUCTION ? "intl" : "local"; }
+void case10_5() { var s = BuildConfig.IS_PRODUCTION ? "primary" : "secondary"; }
 
 // ============================================================
 // Group 11: Unreachable after return
@@ -247,7 +247,7 @@ void case12_1(bool flag) {
 void case13_1() {
   final bool isProd = BuildConfig.IS_PRODUCTION;
   if (isProd) {
-    doIntl();
+    doPrimary();
   } else {
     doLocal();
   }
@@ -255,7 +255,7 @@ void case13_1() {
 
 void case13_2() {
   final flag = BuildConfig.IS_PRODUCTION;
-  final result = flag ? "intl" : "local";
+  final result = flag ? "primary" : "secondary";
   print(result);
 }
 

@@ -5,8 +5,8 @@ Pipeline:
   2. Safety analysis via ``ContractGraph`` / language adapters (no
      class-name heuristics or ad-hoc public promotion patches).
   3. Iterative call replacement for zero-arg constant/void methods.
-  4. Definition deletion for unreferenced safe methods (including
-     unused non-constant methods and unused fields).
+  4. Definition deletion for unreferenced methods approved by the language
+     adapter (including unused fields).
   5. Bound leading comments are removed with their host declaration.
 """
 
@@ -18,14 +18,13 @@ import time
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-from .. import lang as _lang
+from ..adapters import get_adapter
 from .. import ui
 from ..analysis.project_scan import scan_project, semantic_method_key, ProjectScanResult
 from ..analysis.ref_index import (
     clear_text_index_cache, is_in_comment_or_string,
     iter_dynamic_reference_names,
 )
-from ..analysis.class_hierarchy import enhance_safety
 from ..analysis.contracts import promote_unreferenced
 from ..analysis.code_edit import (
     replace_calls_in_content, remove_void_calls_in_content,
@@ -36,11 +35,6 @@ from ..analysis.code_edit import (
 from ..analysis.method_scanner import scan_method_definitions
 from ..analysis.field_scanner import scan_fields
 from ..validation import validate_transformation
-from ..steps.constant_fold import step1b_propagate_locals, step1c_remove_unused_bool_vars
-from ..steps.bool_simplify import step2_simple
-from ..steps.compound_bool import step3_compound
-from ..steps.if_blocks import step4_if_blocks
-from ..steps.unreachable import step1d_remove_unreachable
 
 _MIN_PARALLEL = 50
 _SIMPLIFY_FILES_PER_WORKER = 40
@@ -48,38 +42,22 @@ _SIMPLIFY_FILES_PER_WORKER = 40
 
 def _simplify_files_worker(file_paths):
     """Worker: run step1b-4 simplification on a batch of files."""
-    from .. import lang as _lang
-    from ..steps.constant_fold import step1b_propagate_locals, step1c_remove_unused_bool_vars
-    from ..steps.bool_simplify import step2_simple
-    from ..steps.compound_bool import step3_compound
-    from ..steps.if_blocks import step4_if_blocks
-    from ..steps.unreachable import step1d_remove_unreachable
-    from ..validation import validate_transformation
+    from ..transform import run_pipeline
 
+    errors: list[tuple[str, str]] = []
     for fp in file_paths:
         try:
             with open(fp, 'rb') as f:
                 cb = f.read()
             original_cb = cb
             ext = os.path.splitext(fp)[1].lower()
-            _lang._current_ext = ext
-            for _ in range(5):
-                prev = cb
-                cb = step1b_propagate_locals(cb)
-                cb = step2_simple(cb)
-                cb = step3_compound(cb)
-                cb = step4_if_blocks(cb, ext in ('.kt', '.kts'))
-                cb = step1d_remove_unreachable(cb)
-                cb = step1c_remove_unused_bool_vars(cb)
-                if cb == prev:
-                    break
-            cb = validate_transformation(original_cb, cb, ext)
+            cb = run_pipeline(cb, ext=ext, max_rounds=5)
             if cb != original_cb:
                 with open(fp, 'wb') as f:
                     f.write(cb)
-        except Exception:
-            pass
-    return len(file_paths)
+        except Exception as exc:
+            errors.append((fp, str(exc)))
+    return errors
 
 
 def _scan_field_refs_worker(args):
@@ -100,30 +78,21 @@ def _scan_field_refs_worker(args):
     return refs
 
 
-def _simplify_single(fp: str) -> None:
+def _simplify_single(fp: str) -> str | None:
     """Sequential fallback: simplify one file in-place."""
     try:
         with open(fp, 'rb') as f:
             cb = f.read()
         original_cb = cb
         ext = os.path.splitext(fp)[1].lower()
-        _lang._current_ext = ext
-        for _ in range(5):
-            prev = cb
-            cb = step1b_propagate_locals(cb)
-            cb = step2_simple(cb)
-            cb = step3_compound(cb)
-            cb = step4_if_blocks(cb, ext in ('.kt', '.kts'))
-            cb = step1d_remove_unreachable(cb)
-            cb = step1c_remove_unused_bool_vars(cb)
-            if cb == prev:
-                break
-        cb = validate_transformation(original_cb, cb, ext)
+        from ..transform import run_pipeline
+        cb = run_pipeline(cb, ext=ext, max_rounds=5)
         if cb != original_cb:
             with open(fp, 'wb') as f:
                 f.write(cb)
-    except Exception:
-        pass
+        return None
+    except Exception as exc:
+        return str(exc)
 
 
 def _method_key(method: dict) -> tuple:
@@ -139,6 +108,7 @@ def _method_key(method: dict) -> tuple:
 
 def step6_project(root_dir: str, dry_run: bool = False,
                   *, scan: ProjectScanResult | None = None,
+                  show_header: bool = True,
                   ) -> tuple[int, set[str]]:
     """Run full dead-declaration cleanup on *root_dir*.
 
@@ -149,7 +119,8 @@ def step6_project(root_dir: str, dry_run: bool = False,
     Returns ``(processed_count, modified_files)``.
     """
     t0 = time.time()
-    ui.section("Step 6  Dead Method Cleanup")
+    if show_header:
+        ui.section("Dead Declaration Cleanup")
     clear_text_index_cache()
 
     if scan is None:
@@ -176,19 +147,11 @@ def step6_project(root_dir: str, dry_run: bool = False,
         kind_str += f", null_return={null_count}"
     ui.info(f"Dead methods: {ui.bold(str(len(all_dead)))} ({kind_str}, safe={safe_count})")
 
-    t_safety = time.time()
-    ui.info("Analyzing contracts & hierarchy for safety...")
-    enhanced = enhance_safety(
-        all_dead, scan.children_map, scan.final_classes,
-        scan.iface_abstract, scan.implements, contracts=contracts)
-    safe_count = sum(1 for d in all_dead if d['safe_to_inline'])
-    ui.info(f"Promoted {enhanced} via contracts → safe={safe_count}  "
-            f"{ui.dim(ui.fmt_elapsed(time.time()-t_safety))}")
-
     t_unused = time.time()
-    ui.info("Analyzing non-constant static methods for unused definitions...")
+    ui.info("Analyzing non-constant removable methods for unused definitions...")
     unused_extra = _collect_unused_methods(
         scan, contracts, ref_index, content_cache=content_cache,
+        member_ref_index=scan.member_ref_index,
         type_ref_index=scan.type_ref_index,
         dynamic_ref_index=scan.dynamic_ref_index)
     if unused_extra:
@@ -210,6 +173,7 @@ def step6_project(root_dir: str, dry_run: bool = False,
     t_pre = time.time()
     _promote_unreferenced(
         all_dead, ref_index, contracts, content_cache=content_cache,
+        member_ref_index=scan.member_ref_index,
         type_ref_index=scan.type_ref_index,
         dynamic_ref_index=scan.dynamic_ref_index)
     safe_count = sum(1 for d in all_dead if d['safe_to_inline'])
@@ -231,7 +195,8 @@ def step6_project(root_dir: str, dry_run: bool = False,
         ]
         if not new_dead:
             break
-        ui.info(f"\nPhase 3 · round {iteration+1}: processing {len(new_dead)} methods...")
+        ui.stage(f"Call-site rewriting · pass {iteration + 1}")
+        ui.info(f"Processing {len(new_dead)} methods...", indent=4)
 
         round_modified: set[str] = set()
         round_processed = 0
@@ -355,7 +320,8 @@ def step6_project(root_dir: str, dry_run: bool = False,
                                    for chunk in chunks}
                         completed = 0
                         for future in as_completed(futures):
-                            future.result()
+                            for fp, message in future.result():
+                                ui.warn(f"Skipped {fp}: {message}", indent=4)
                             completed += futures[future]
                             ui.progress(completed, len(mod_list),
                                         "Simplifying", indent=4)
@@ -365,32 +331,38 @@ def step6_project(root_dir: str, dry_run: bool = False,
                     ui.warn("Parallel simplification failed; retrying sequentially",
                             indent=4)
                     for idx, fp in enumerate(mod_list):
-                        _simplify_single(fp)
+                        error = _simplify_single(fp)
+                        if error:
+                            ui.warn(f"Skipped {fp}: {error}", indent=4)
                         ui.progress(idx + 1, len(mod_list),
                                     "Simplifying", indent=4)
                     ui.progress_done()
             else:
                 for idx, fp in enumerate(mod_list):
-                    _simplify_single(fp)
+                    error = _simplify_single(fp)
+                    if error:
+                        ui.warn(f"Skipped {fp}: {error}", indent=4)
                     ui.progress(idx + 1, len(mod_list),
                                 "Simplifying", indent=4)
                 ui.progress_done()
 
-        ui.info(f"Round {iteration+1}: {round_processed} call sites, "
+        ui.info(f"Rewrite pass {iteration+1}: {round_processed} call sites, "
                 f"{len(round_modified)} files modified", indent=4)
         if not round_modified:
             break
 
-    ui.info(f"Phase 3 complete: {total_processed} call sites  "
-            f"({iteration+1} round{'s' if iteration > 0 else ''})")
+    ui.info(f"Call-site rewriting complete: {total_processed} call sites  "
+            f"({iteration+1} pass{'es' if iteration > 0 else ''})")
 
-    # Phase 4: update ref_index incrementally for modified files only.
-    ui.info("\nPhase 4: Deleting unreferenced definitions...")
+    # Update ref_index incrementally for modified files before deletion.
+    ui.stage("Deleting unreferenced definitions")
     t_del = time.time()
     if files_modified:
         ui.info(f"Updating ref index for {len(files_modified)} modified files...", indent=4)
         modified_set = set(files_modified)
         for name_set in ref_index.values():
+            name_set -= modified_set
+        for name_set in scan.member_ref_index.values():
             name_set -= modified_set
         from ..analysis.ref_index import iter_reference_names
         for fp in files_modified:
@@ -398,8 +370,12 @@ def step6_project(root_dir: str, dry_run: bool = False,
                 with open(fp, 'r', encoding='utf-8', errors='ignore') as f:
                     content = f.read()
                 content_cache[fp] = content
-                for name in iter_reference_names(content):
+                member_names: set[str] = set()
+                for name in iter_reference_names(
+                        content, member_names=member_names):
                     ref_index.setdefault(name, set()).add(fp)
+                for name in member_names:
+                    scan.member_ref_index.setdefault(name, set()).add(fp)
             except Exception:
                 pass
     clear_text_index_cache()
@@ -419,7 +395,7 @@ def step6_project(root_dir: str, dry_run: bool = False,
             with open(fp, 'rb') as f:
                 cb = f.read()
             ext = os.path.splitext(fp)[1].lower()
-            # Include non-constant method definitions as Phase 4 also
+            # Include non-constant method definitions because this pass also
             # deletes records classified as ``unused``.
             current_methods = scan_method_definitions(fp, cb, ext)
             content = cb.decode('utf-8', errors='replace')
@@ -461,6 +437,7 @@ def step6_project(root_dir: str, dry_run: bool = False,
                         scan.children_map, scan.iface_abstract,
                         polymorphic=poly,
                         content_cache=content_cache,
+                        member_ref_index=scan.member_ref_index,
                         type_ref_index=scan.type_ref_index,
                         dynamic_ref_index=scan.dynamic_ref_index):
                     continue
@@ -492,7 +469,7 @@ def step6_project(root_dir: str, dry_run: bool = False,
             ui.warn(f"delete {fp}: {e}", indent=4)
 
     ui.progress_done()
-    ui.info(f"Phase 4: deleted {del_count} definitions  "
+    ui.info(f"Definition deletion complete: {del_count} deleted  "
             f"{ui.dim(ui.fmt_elapsed(time.time()-t_del))}")
 
     field_del = _cleanup_unused_fields(scan, files_modified)
@@ -507,15 +484,16 @@ def step6_project(root_dir: str, dry_run: bool = False,
 
 def _collect_unused_methods(scan, contracts, ref_index,
                             content_cache: dict[str, str] | None = None,
+                            member_ref_index: dict[str, set[str]] | None = None,
                             type_ref_index: dict[str, set[str]] | None = None,
                             dynamic_ref_index: dict[str, set[str]] | None = None,
                             ) -> list[dict]:
-    """Find unused *static* methods with non-constant bodies.
+    """Find unused non-constant methods allowed by the language policy.
 
-    Restricted to static methods so private instance helpers with real
-    logic are not removed solely for lacking local callers (those often
-    remain as intentional extension points).  Static AB/flag helpers with
-    zero refs (e.g. ``CoreIntlController.isTabMeA``) are the target.
+    Arbitrary method bodies are removed only when the owning adapter declares
+    that all relevant reference forms are covered.  This is intentionally
+    stricter than constant/empty cleanup: a visibility check alone cannot
+    prove absence of implicit calls or callable-value references.
     """
     from ..analysis.contracts import is_safe_to_remove
 
@@ -534,7 +512,9 @@ def _collect_unused_methods(scan, contracts, ref_index,
             continue
         if m.get('has_annotation'):
             continue
-        if not m.get('is_static'):
+        adapter = get_adapter(os.path.splitext(m['filepath'])[1].lower())
+        if (adapter is None
+                or not adapter.can_prune_unreferenced_nonconstant(m)):
             continue
         mods = m.get('all_mods', set()) or set()
         if mods & {'abstract', 'open', 'override', 'native', 'Override'}:
@@ -562,6 +542,7 @@ def _collect_unused_methods(scan, contracts, ref_index,
                                scan.children_map, scan.iface_abstract,
                                polymorphic=poly,
                                content_cache=content_cache,
+                               member_ref_index=member_ref_index,
                                type_ref_index=type_ref_index,
                                dynamic_ref_index=dynamic_ref_index):
             continue
@@ -606,7 +587,7 @@ def _cleanup_unused_fields(scan: ProjectScanResult,
     Uses word extraction + frozenset lookup instead of a huge alternation
     regex, making the scan O(text) instead of O(text × num_candidates).
     """
-    ui.info("\nPhase 5: Unused field cleanup...")
+    ui.stage("Cleaning unused fields")
     t0 = time.time()
 
     fresh_fields: list[dict] = [
@@ -629,13 +610,15 @@ def _cleanup_unused_fields(scan: ProjectScanResult,
             continue
         if not f.get('is_final'):
             continue
-        if not (f.get('is_private') or f.get('is_static')):
+        # Public/exported fields are API surface even when static.  Only
+        # language-private declarations are eligible for removal.
+        if not f.get('is_private'):
             continue
         candidate_fields.append(f)
         candidate_names.add(f['name'])
 
     if not candidate_names:
-        ui.info(f"Phase 5: no candidate fields  "
+        ui.info(f"Unused-field cleanup: no candidates  "
                 f"{ui.dim(ui.fmt_elapsed(time.time()-t0))}")
         return 0
 
@@ -763,7 +746,7 @@ def _cleanup_unused_fields(scan: ProjectScanResult,
         except Exception as e:
             ui.warn(f"field delete {fp}: {e}", indent=4)
 
-    ui.info(f"Phase 5: deleted {deleted} unused fields  "
+    ui.info(f"Unused-field cleanup complete: {deleted} deleted  "
             f"{ui.dim(ui.fmt_elapsed(time.time()-t0))}")
     return deleted
 
@@ -790,6 +773,7 @@ def _field_has_same_file_refs_lines(name: str, lines: list[str],
 def _promote_unreferenced(
         all_dead, ref_index, contracts,
         content_cache: dict[str, str] | None = None,
+        member_ref_index: dict[str, set[str]] | None = None,
         type_ref_index: dict[str, set[str]] | None = None,
         dynamic_ref_index: dict[str, set[str]] | None = None):
     candidates = [dm for dm in all_dead if not dm.get('safe_to_inline')]
@@ -811,6 +795,7 @@ def _promote_unreferenced(
                     contracts.children_map, contracts.iface_abstract,
                     polymorphic=poly,
                     content_cache=content_cache,
+                    member_ref_index=member_ref_index,
                     type_ref_index=type_ref_index,
                     dynamic_ref_index=dynamic_ref_index):
                 has_ref = True
@@ -878,10 +863,14 @@ def _batch_same_file_refs(
                 continue
 
         wanted = {m['name'] for m in methods}
+        adapter = get_adapter(os.path.splitext(fp)[1].lower())
+        reference_patterns = [_ANY_CALL_PAT, _ANY_METHOD_REF_PAT]
+        if adapter:
+            reference_patterns.extend(adapter.implicit_call_patterns)
         call_lines: dict[str, set[int]] = defaultdict(set)
         offset = 0
         for line_no, line in enumerate(content.splitlines(keepends=True)):
-            for pattern in (_ANY_CALL_PAT, _ANY_METHOD_REF_PAT):
+            for pattern in reference_patterns:
                 for match in pattern.finditer(line):
                     name = match.group(1)
                     if name not in wanted:

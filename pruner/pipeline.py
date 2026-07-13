@@ -21,9 +21,9 @@ so the operator always knows what the tool is doing.
 """
 
 import os
-import sys
+import shutil
+import tempfile
 import time
-from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from .lang import SUPPORTED_EXTS, SKIP_DIRS
@@ -47,15 +47,15 @@ _file_snapshots: dict[str, bytes] = {}
 def _process_files_worker(args):
     """Worker for parallel step1-4 processing.
 
-    Receives ``(file_paths, replacements, pattern_bytes)``.
-    Returns list of changed file paths.
+    Receives ``(file_paths, replacements)``.
+    Returns changed file paths and per-file errors.
     """
-    file_paths, replacements, pattern_bytes = args
+    file_paths, replacements = args
     from . import lang as _lang
     from .transform import run_pipeline
-    from .validation import validate_transformation
 
     changed = []
+    errors: list[tuple[str, str]] = []
     for fp in file_paths:
         try:
             ext = os.path.splitext(fp)[1].lower()
@@ -63,17 +63,14 @@ def _process_files_worker(args):
                 continue
             with open(fp, 'rb') as fh:
                 cb = fh.read()
-            if pattern_bytes and not any(pb in cb for pb in pattern_bytes):
-                continue
-            is_kt = ext in ('.kt', '.kts')
-            new_cb = run_pipeline(cb, replacements, is_kt, ext)
+            new_cb = run_pipeline(cb, replacements, ext=ext)
             if new_cb != cb:
                 with open(fp, 'wb') as fh:
                     fh.write(new_cb)
                 changed.append(fp)
-        except Exception:
-            pass
-    return changed
+        except Exception as exc:
+            errors.append((fp, str(exc)))
+    return changed, errors
 
 
 def _run_quality_gate_rollback(target: str) -> int:
@@ -124,8 +121,7 @@ def _snapshot_file(filepath: str):
 
 
 def _run_steps_1_4(target: str, replacements: list, dry_run: bool,
-                    label: str = "Steps 1-4",
-                    prefilter_replacements: bool = True,
+                    label: str = "Transforming",
                     file_subset: set[str] | None = None,
                     track_changed: bool = False):
     """Run step1-4 on files under *target*, return number of files changed.
@@ -148,15 +144,10 @@ def _run_steps_1_4(target: str, replacements: list, dry_run: bool,
         else:
             with open(target, 'rb') as f:
                 orig = f.read()
-            is_kt = ext in ('.kt', '.kts')
-            if run_pipeline(orig, replacements, is_kt, ext=ext) != orig:
+            if run_pipeline(orig, replacements, ext=ext) != orig:
                 cnt = 1
                 changed_paths.add(target)
     else:
-        pattern_bytes = (
-            [pat.encode('utf-8') for pat, _ in replacements]
-            if replacements and prefilter_replacements else []
-        )
         if file_subset is not None:
             all_targets = sorted(file_subset)
         else:
@@ -169,7 +160,7 @@ def _run_steps_1_4(target: str, replacements: list, dry_run: bool,
                         all_targets.append(os.path.join(dp, fn))
 
         total = len(all_targets)
-        ui.info(f"{ui.dim(label)}  Processing {total} files...")
+        ui.info(f"{ui.dim(label)}: processing {total} files...")
         n_workers = min(os.cpu_count() or 1, max(1, total // _MIN_PARALLEL))
 
         if n_workers > 1 and total >= _MIN_PARALLEL and not dry_run:
@@ -185,14 +176,16 @@ def _run_steps_1_4(target: str, replacements: list, dry_run: bool,
                     futures = {
                         executor.submit(
                             _process_files_worker,
-                            (chunk, replacements, pattern_bytes)):
+                            (chunk, replacements)):
                         len(chunk)
                         for chunk in chunks
                     }
                     for future in as_completed(futures):
-                        chunk_changed = future.result()
+                        chunk_changed, chunk_errors = future.result()
                         cnt += len(chunk_changed)
                         changed_paths.update(chunk_changed)
+                        for fp, message in chunk_errors:
+                            ui.warn(f"Skipped {fp}: {message}")
                         completed += futures[future]
                         ui.progress(completed, total, label, f"{cnt} changed")
             except Exception as e:
@@ -204,11 +197,6 @@ def _run_steps_1_4(target: str, replacements: list, dry_run: bool,
                     if (idx + 1) % 500 == 0 or idx + 1 == total:
                         ui.progress(idx + 1, total, label, f"{cnt} changed")
                     try:
-                        if pattern_bytes:
-                            with open(fp, 'rb') as fh:
-                                raw = fh.read()
-                            if not any(pb in raw for pb in pattern_bytes):
-                                continue
                         if process_file(fp, replacements):
                             cnt += 1
                             changed_paths.add(fp)
@@ -216,30 +204,23 @@ def _run_steps_1_4(target: str, replacements: list, dry_run: bool,
                         pass
         else:
             for idx, fp in enumerate(all_targets):
-                if (idx + 1) % 500 == 0 or idx + 1 == total:
-                    ui.progress(idx + 1, total, label, f"{cnt} changed")
                 try:
-                    if pattern_bytes:
-                        with open(fp, 'rb') as fh:
-                            raw = fh.read()
-                        if not any(pb in raw for pb in pattern_bytes):
-                            continue
                     if not dry_run:
                         _snapshot_file(fp)
                         if process_file(fp, replacements):
                             cnt += 1
                             changed_paths.add(fp)
                     else:
-                        if not pattern_bytes:
-                            with open(fp, 'rb') as fh:
-                                raw = fh.read()
+                        with open(fp, 'rb') as fh:
+                            raw = fh.read()
                         ext = os.path.splitext(fp)[1].lower()
-                        is_kt = ext in ('.kt', '.kts')
-                        if run_pipeline(raw, replacements, is_kt, ext=ext) != raw:
+                        if run_pipeline(raw, replacements, ext=ext) != raw:
                             cnt += 1
                             changed_paths.add(fp)
                 except Exception as e:
                     ui.error(f"{fp}: {e}")
+                if (idx + 1) % 500 == 0 or idx + 1 == total:
+                    ui.progress(idx + 1, total, label, f"{cnt} changed")
         ui.progress_done()
     dt = time.time() - t0
     verb = "would change" if dry_run else "changed"
@@ -252,33 +233,10 @@ def _run_steps_1_4(target: str, replacements: list, dry_run: bool,
 def run_phase_1(target: str, replacements: list, dry_run: bool) -> tuple[int, float]:
     ui.banner("Phase 1  Constant Folding + Boolean Simplification")
     t0 = time.time()
-    total = 0
-    max_rounds = 20
-    dirty: set[str] | None = None
-    for r in range(1, max_rounds + 1):
-        ui.phase_header(1, "step1-4 pipeline", r)
-        if dirty is not None and not dirty:
-            ui.success(f"Phase 1 converged after {r-1} round(s)  "
-                       f"{ui.dim(f'(total: {total} files)')}")
-            break
-        cnt = _run_steps_1_4(
-            target, replacements, dry_run, f"Round {r}",
-            prefilter_replacements=(r == 1),
-            file_subset=dirty,
-            track_changed=True,
-        )
-        if isinstance(cnt, tuple):
-            n, changed = cnt
-        else:
-            n, changed = cnt, set()
-        total += n
-        if n == 0:
-            ui.success(f"Phase 1 converged after {r} round(s)  "
-                       f"{ui.dim(f'(total: {total} files)')}")
-            break
-        dirty = changed if changed else None
-    else:
-        ui.warn(f"Phase 1 did NOT converge after {max_rounds} rounds")
+    ui.round_header(1, "Per-file fixed-point simplification")
+    total = _run_steps_1_4(
+        target, replacements, dry_run, "Transforming", track_changed=False)
+    ui.success("Phase 1 converged in one project pass; each file reached its fixed point")
     elapsed = time.time() - t0
     return total, elapsed
 
@@ -309,9 +267,10 @@ def run_phase_2(target: str, replacements: list, dry_run: bool) -> tuple[int, fl
     total = 0
     max_rounds = 10
     for r in range(1, max_rounds + 1):
-        ui.phase_header(2, "step5 inline", r)
+        ui.round_header(r, "Constant-return method inlining")
         t_inline = time.time()
-        inline_cnt, modified = step5_project(target, dry_run=dry_run)
+        inline_cnt, modified = step5_project(
+            target, dry_run=dry_run, show_header=False)
         ui.info(f"Inlined {ui.bold(str(inline_cnt))} items  "
                 f"{ui.dim(ui.fmt_elapsed(time.time() - t_inline))}")
 
@@ -319,7 +278,6 @@ def run_phase_2(target: str, replacements: list, dry_run: bool) -> tuple[int, fl
         if inline_cnt > 0 and not dry_run and modified:
             cascade_cnt = _run_steps_1_4(
                 target, replacements, dry_run, "cascade",
-                prefilter_replacements=False,
                 file_subset=modified,
             )
 
@@ -346,9 +304,10 @@ def run_phase_3(target: str, replacements: list, dry_run: bool) -> tuple[int, fl
     scan = scan_project(target, progress_interval=500)
 
     for r in range(1, max_rounds + 1):
-        ui.phase_header(3, "step6 dead-method cleanup", r)
+        ui.round_header(r, "Dead declaration cleanup")
         t_dead = time.time()
-        dead_cnt, modified = step6_project(target, dry_run=dry_run, scan=scan)
+        dead_cnt, modified = step6_project(
+            target, dry_run=dry_run, scan=scan, show_header=False)
         ui.info(f"Cleaned {ui.bold(str(dead_cnt))} items  "
                 f"{ui.dim(ui.fmt_elapsed(time.time() - t_dead))}")
 
@@ -357,7 +316,6 @@ def run_phase_3(target: str, replacements: list, dry_run: bool) -> tuple[int, fl
         if dead_cnt > 0 and not dry_run and modified:
             result = _run_steps_1_4(
                 target, replacements, dry_run, "cascade",
-                prefilter_replacements=False,
                 file_subset=modified,
                 track_changed=True,
             )
@@ -385,16 +343,40 @@ def run_phase_3(target: str, replacements: list, dry_run: bool) -> tuple[int, fl
 
 # ── Full pipeline ─────────────────────────────────────────────
 
+def _copy_simulation_target(target: str, temp_root: str) -> str:
+    """Create an isolated project copy for an exact dry-run."""
+    name = os.path.basename(os.path.abspath(target)) or 'project'
+    destination = os.path.join(temp_root, name)
+    if os.path.isdir(target):
+        shutil.copytree(
+            target, destination,
+            ignore=lambda _path, names: [n for n in names if n in SKIP_DIRS],
+        )
+    else:
+        shutil.copy2(target, destination)
+    return destination
+
+
 def run_full_pipeline(
     target: str,
     config_path: str,
     *,
     dry_run: bool = False,
     phases: list[int] | None = None,
+    _simulation: bool = False,
+    _display_target: str | None = None,
 ) -> dict:
-    """Execute the full 3-phase pipeline."""
+    """Execute the full pipeline, including cascades in dry-run mode."""
+    if dry_run and not _simulation:
+        with tempfile.TemporaryDirectory(prefix='dead-code-pruner-') as temp_root:
+            simulated_target = _copy_simulation_target(target, temp_root)
+            return run_full_pipeline(
+                simulated_target, config_path, dry_run=False, phases=phases,
+                _simulation=True, _display_target=target)
+
     pipeline_start = time.time()
-    mode = "DRY-RUN" if dry_run else "EXECUTE"
+    report_dry_run = dry_run or _simulation
+    mode = "DRY-RUN" if report_dry_run else "EXECUTE"
 
     replacements = load_config(config_path)
 
@@ -403,7 +385,7 @@ def run_full_pipeline(
 
     ui.banner(f"dead-code-pruner  [{mode}]")
     ui.kv("Engine", "tree-sitter AST")
-    ui.kv("Target", target)
+    ui.kv("Target", _display_target or target)
     ui.kv("Layout", layout_desc)
     ui.kv("Config", config_path)
     ui.kv("Rules", f"{len(replacements)} replacement(s)")
@@ -447,7 +429,8 @@ def run_full_pipeline(
         grand_total += cnt
 
         t_cleanup = time.time()
-        cleanup = step7_empty_cleanup(target, dry_run=dry_run)
+        cleanup = step7_empty_cleanup(
+            target, dry_run=dry_run, show_header=False)
         cleanup_cnt = cleanup['classes_removed'] + cleanup['files_deleted']
         if cleanup_cnt > 0:
             results['cleanup'] = {
@@ -477,6 +460,8 @@ def run_full_pipeline(
             try:
                 with open(fp, 'rb') as f:
                     cur_bytes = f.read()
+            except FileNotFoundError:
+                cur_bytes = b''
             except Exception:
                 continue
             if cur_bytes == orig_bytes:
@@ -500,11 +485,13 @@ def run_full_pipeline(
         rows.append((label, f"{r['changes']} changes  {ui.dim(ui.fmt_elapsed(r['elapsed']))}"))
     rows.append(("Events", str(grand_total)))
 
-    if not dry_run and grand_total > 0:
-        rows.append(("Files changed", str(len(files_changed_set))))
+    if grand_total > 0:
+        file_label = "Files would change" if report_dry_run else "Files changed"
+        line_label = "Lines would change" if report_dry_run else "Lines changed"
+        rows.append((file_label, str(len(files_changed_set))))
         net = lines_added - lines_removed
         net_str = f"{ui.green(f'+{lines_added}')} {ui.red(f'-{lines_removed}')} (net {net:+d})"
-        rows.append(("Lines changed", net_str))
+        rows.append((line_label, net_str))
         gate_passed = rejected_count == 0
         rows.append(("Quality gate", f"{ui.quality_badge(gate_passed)}  "
                       f"({rejected_count} rejected)"))
@@ -518,6 +505,9 @@ def run_full_pipeline(
         ui.info("  1. Compile your project to verify correctness", indent=2)
         ui.info("  2. Fix any compilation errors", indent=2)
         ui.info('  3. git add -A && git commit -m "refactor: prune dead code"', indent=2)
+    elif grand_total > 0 and report_dry_run:
+        print()
+        ui.info("Dry-run complete — the original project was not modified.")
     elif grand_total == 0:
         print()
         ui.success("No changes needed — code is already clean.")

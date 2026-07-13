@@ -5,7 +5,7 @@ import Foundation
 // ============================================================
 
 func case1_1() {
-    doIntl()
+    doPrimary()
 }
 
 func case1_2() {
@@ -13,23 +13,23 @@ func case1_2() {
 }
 
 func case1_3() {
-    if act == fakeLikersAct {
-        showFrom = "intl"
+    if act == sampleActivity {
+        showFrom = "primary"
     }
 }
 
 func case1_4() {
-    // if INTL_FLAG { ... }
-    /* INTL_FLAG check */
+    // if FEATURE_FLAG { ... }
+    /* FEATURE_FLAG check */
 }
 
 func case1_5() {
-    let s = "INTL_FLAG is true"
+    let s = "FEATURE_FLAG is true"
 }
 
 func case1_6() -> Bool { return true }
 
-func case1_7() { let isIntl = true; doSomething(isIntl) }
+func case1_7() { let isPrimary = true; doSomething(isPrimary) }
 
 func case1_8() { foo(true, "test") }
 
@@ -196,7 +196,7 @@ func case10_9() { setEnabled(true); setVisible(false) }
 // ============================================================
 
 func case11_1() {
-    if signUpType == cosmos {
+    if flowMode == special {
         doComplex()
     } else {
         toEarlyUid()
@@ -204,10 +204,10 @@ func case11_1() {
 }
 
 func case11_2() {
-    if signUpType == cosmos {
+    if flowMode == special {
         doComplex()
     } else {
-        toSignUp()
+        continueFlow()
     }
 }
 
@@ -254,7 +254,7 @@ func case12_4() {
 // ============================================================
 
 func case13_1() {
-    if equals(nextStage, ethnicitySaved) {
+    if equals(nextStage, localeReady) {
         doSomething()
     }
 }
@@ -276,7 +276,7 @@ func case15_1() {
 }
 
 func case15_7() {
-    doIntl()
+    doPrimary()
 }
 
 func case16_1() {
@@ -331,7 +331,7 @@ func case17_7() {
 // ============================================================
 
 func case19_3() {
-    doIntl()
+    doPrimary()
     doCommon()
 }
 
@@ -344,7 +344,7 @@ func case20_1() {
 }
 
 func case20_2() {
-    doIntl()
+    doPrimary()
 }
 
 func case20_3() {
@@ -364,21 +364,21 @@ func case20_5(x: Int) {
 // Group 23: Switch/case boundary
 // ============================================================
 
-func case23_1(privilege: Int) -> String {
-    switch privilege {
+func case23_1(choice: Int) -> String {
+    switch choice {
     case 1:
-        return buildIntl(privilege)
+        return buildPrimary(choice)
     case 2:
-        return buildUndo(privilege)
+        return buildUndo(choice)
     default:
-        return buildDefault(privilege)
+        return buildDefault(choice)
     }
 }
 
 func case23_2(t: Int) -> String {
     switch t {
     case 1:
-        return "intl"
+        return "primary"
     case 2:
         return "other"
     default:
@@ -391,7 +391,7 @@ func case23_2(t: Int) -> String {
 // ============================================================
 
 func case24_1() {
-    doIntl()
+    doPrimary()
 }
 
 func case24_multiline(flag: Bool) {

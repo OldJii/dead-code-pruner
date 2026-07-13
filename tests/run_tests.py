@@ -42,8 +42,7 @@ def run_test(input_file, expected_file):
         with open(tmp_path, 'rb') as f:
             cb = f.read()
         replacements = load_config(CONFIG)
-        is_kt = ext in ('.kt', '.kts')
-        actual_bytes = run_pipeline(cb, replacements, is_kt, ext=ext)
+        actual_bytes = run_pipeline(cb, replacements, ext=ext)
         actual = actual_bytes.decode('utf-8', errors='replace')
 
         with open(expected_path, 'r') as f:

@@ -5,7 +5,7 @@ package com.test
 // ============================================================
 
 fun case1_1() {
-    doIntl()
+    doPrimary()
 }
 
 fun case1_2() {
@@ -13,19 +13,19 @@ fun case1_2() {
 }
 
 fun case1_3() {
-    doIntl()
+    doPrimary()
 }
 
 fun case1_4() {
-    doIntl()
+    doPrimary()
 }
 
-fun case1_5() { val s = "intl"
+fun case1_5() { val s = "primary"
 }
 
 fun case1_6(): Boolean { return true }
 
-fun case1_7() { val isIntl = true; doSomething(isIntl) }
+fun case1_7() { val isPrimary = true; doSomething(isPrimary) }
 
 fun case1_8() { foo(true, "test") }
 
@@ -96,11 +96,11 @@ fun case5_2() {
 }
 
 fun case5_3() {
-    doIntl()
+    doPrimary()
 }
 
 fun case5_4() {
-    doIntl()
+    doPrimary()
 }
 
 // ============================================================
@@ -197,7 +197,7 @@ fun case10_9() { setEnabled(true); setVisible(false) }
 // ============================================================
 
 fun case11_1() {
-    if (signUpType == "cosmos") {
+    if (flowMode == "special") {
         doComplex()
     } else {
         toEarlyUid()
@@ -205,10 +205,10 @@ fun case11_1() {
 }
 
 fun case11_2() {
-    if (signUpType == "cosmos") {
+    if (flowMode == "special") {
         doComplex()
     } else {
-        toSignUp()
+        continueFlow()
     }
 }
 
@@ -253,7 +253,7 @@ fun case12_4() {
 // ============================================================
 
 fun case13_1() {
-    if (equals(nextStage, ethnicitySaved)) {
+    if (equals(nextStage, localeReady)) {
         doSomething()
     }
 }
@@ -279,7 +279,7 @@ fun case15_1() {
 }
 
 fun case15_7() {
-    doIntl()
+    doPrimary()
 }
 
 fun case16_1() {
@@ -334,11 +334,11 @@ fun case18_1(): Boolean {
 // ============================================================
 
 fun case19_1(type: Int): Any {
-    return GPComponent(type)
+    return PrimaryComponent(type)
 }
 
 fun case19_3() {
-    doIntl()
+    doPrimary()
     doCommon()
 }
 
@@ -351,7 +351,7 @@ fun case20_1() {
 }
 
 fun case20_2() {
-    doIntl()
+    doPrimary()
 }
 
 fun case20_5(x: Int) {
@@ -371,7 +371,7 @@ fun case21_1() {
 }
 
 fun case21_2() {
-    return RemoteConfig.getInstance().getBoolean(ALL_MY_LIKES_SHOW)
+    return RemoteConfig.getInstance().getBoolean(SAMPLE_REMOTE_TOGGLE)
 }
 
 fun case21_3() {
@@ -385,7 +385,7 @@ fun case21_4() {
 }
 
 fun case21_5() {
-    val x = "intl"
+    val x = "primary"
     println(x)
 }
 
@@ -429,11 +429,11 @@ fun case22_4(): Boolean {
 // Group 23: when (Kotlin switch)
 // ============================================================
 
-fun case23_1(privilege: Int): String {
-    return when (privilege) {
-        1 -> buildIntl(privilege)
-        2 -> buildUndo(privilege)
-        else -> buildDefault(privilege)
+fun case23_1(choice: Int): String {
+    return when (choice) {
+        1 -> buildPrimary(choice)
+        2 -> buildUndo(choice)
+        else -> buildDefault(choice)
     }
 }
 
@@ -442,11 +442,11 @@ fun case23_1(privilege: Int): String {
 // ============================================================
 
 fun case24_1() {
-    doIntl()
+    doPrimary()
 }
 
 fun case24_2() {
-    val result = "intl"
+    val result = "primary"
     println(result)
 }
 

@@ -8,7 +8,7 @@ class Case17_CascadeBoolean {
         if (false) {
             showLocal();
         } else {
-            showIntl();
+            showPrimary();
         }
 
         // step5 -> false && x  -> step3 -> false  -> step4 -> 删除 if 体
@@ -20,7 +20,7 @@ class Case17_CascadeBoolean {
         boolean enabled = !false;
 
         // step5 -> false ? a : b  -> step3 -> b
-        String mode = false ? "local" : "intl";
+        String mode = false ? "secondary" : "primary";
 
         // step5 -> false || isReady()  -> step3 -> isReady()
         boolean ready = false || isReady();

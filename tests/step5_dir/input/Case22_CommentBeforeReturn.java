@@ -8,12 +8,12 @@ class Case22 {
             return false;
         }
         // 编辑态、实验组、用户本人
-        return isEdit() && isMe() && PayController.isPayWallExp();
+        return isEdit() && isMe() && AccessFlagController.isRestrictionExperimentEnabled();
     }
 
     public int getValue() {
         /* 多行注释
            在 return 前面 */
-        return PayController.isPayWallExp() ? 10 : 20;
+        return AccessFlagController.isRestrictionExperimentEnabled() ? 10 : 20;
     }
 }

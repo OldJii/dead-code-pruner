@@ -7,13 +7,13 @@ import os
 import re
 from collections import defaultdict
 from ..lang import _PARSERS, SKIP_DIRS
+from ..adapters import all_adapters
 from .. import ui
 from .text_index import TextIndex
 
 
-REFERENCE_EXTS = frozenset({
-    '.storyboard', '.xib', '.plist', '.xml', '.json',
-})
+REFERENCE_EXTS = frozenset({'.xml', '.json'}).union(*(
+    adapter.reference_file_extensions for adapter in all_adapters()))
 
 _CALL_PAT = re.compile(r'\b(\w+)\s*\(')
 _REF_PAT = re.compile(r'::(\w+)\b')
@@ -27,6 +27,10 @@ _TYPE_IDENTIFIER_PAT = re.compile(r'\b([A-Z][A-Za-z0-9_]*)\b')
 _IMPORT_SYMBOL_PAT = re.compile(
     r'(?m)^\s*import\s+(?:static\s+)?[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*'
     r'\.([A-Za-z_]\w*)\s*;?\s*$')
+_QUOTED_IDENTIFIER_PAT = re.compile(
+    r'''(?x)
+    (?:"((?:[A-Za-z_]\w*))"|'((?:[A-Za-z_]\w*))')
+    ''')
 
 # Content-keyed cache.  Do NOT key by id(content) alone — CPython reuses
 # object ids after GC, which would return a stale TextIndex for a new string.
@@ -47,7 +51,8 @@ def collect_files(root_dir: str, *, include_reference_files: bool = False) -> li
     return files
 
 
-def iter_reference_names(content: str):
+def iter_reference_names(content: str, *,
+                         member_names: set[str] | None = None):
     """Yield symbol names that may represent call sites or dynamic references.
 
     Includes dot-property access patterns (e.g. ``.isEnabled``) to
@@ -58,7 +63,15 @@ def iter_reference_names(content: str):
     the expensive regex entirely.
     """
     for m in _CALL_PAT.finditer(content):
-        yield m.group(1)
+        name = m.group(1)
+        yield name
+        if member_names is not None:
+            idx = m.start() - 1
+            while idx >= 0 and content[idx].isspace():
+                idx -= 1
+            if (idx >= 0 and content[idx] == '.'
+                    and not is_in_comment_or_string(content, m.start())):
+                member_names.add(name)
     if '::' in content:
         for m in _REF_PAT.finditer(content):
             yield m.group(1)
@@ -107,6 +120,19 @@ def iter_dynamic_reference_names(content: str):
             yield m.group(1)
 
 
+def iter_metadata_reference_names(content: str):
+    """Yield identifier-valued strings from external reference metadata.
+
+    Build plugins and frameworks commonly declare callbacks or bytecode
+    redirection targets in JSON/plist/XML string values rather than source
+    call sites.  This scanner is intentionally used only for reference-only
+    files: applying it to source code would turn arbitrary log/UI strings into
+    false references and unnecessarily retain dead methods.
+    """
+    for match in _QUOTED_IDENTIFIER_PAT.finditer(content):
+        yield match.group(1) or match.group(2)
+
+
 def build_ref_index(all_files: list[str], *, quiet: bool = False,
                     content_cache: dict[str, str] | None = None,
                     ) -> dict[str, set[str]]:
@@ -132,6 +158,9 @@ def build_ref_index(all_files: list[str], *, quiet: bool = False,
             # APIs (for example d/e/bs).  Dropping them makes live methods
             # look unreferenced and is therefore never safe.
             index[name].add(fp)
+        if os.path.splitext(fp)[1].lower() in REFERENCE_EXTS:
+            for name in iter_metadata_reference_names(content):
+                index[name].add(fp)
     if not quiet and total > 100:
         ui.progress_done()
     return index

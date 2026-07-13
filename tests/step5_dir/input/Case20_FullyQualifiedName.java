@@ -5,12 +5,12 @@ class Case20 {
 
     public void test() {
         // 简单限定
-        boolean a = SomeController.isTest();
+        boolean a = PrimaryFlagController.isTest();
         // 全限定名
-        boolean b = com.p1.mobile.putong.core.ab.SomeController.isTest();
+        boolean b = org.example.flags.PrimaryFlagController.isTest();
         // 嵌套包名
-        boolean c = com.p1.mobile.putong.core.ab.experiment.OnLineController.isOnline();
+        boolean c = org.example.flags.experiment.SecondaryFlagController.isOnline();
         // return 语句中的全限定名
-        return com.p1.mobile.putong.core.ab.SomeController.isTest();
+        return org.example.flags.PrimaryFlagController.isTest();
     }
 }

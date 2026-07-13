@@ -6,7 +6,6 @@ convergence loop.
 """
 
 import os
-import sys
 import yaml
 
 from . import lang as _lang
@@ -18,29 +17,31 @@ from .steps.bool_simplify import step2_simple
 from .steps.compound_bool import step3_compound
 from .steps.if_blocks import step4_if_blocks
 from .steps.unreachable import step1d_remove_unreachable
-from .steps.kotlin_expr import kotlin_if_expr
+from .adapters import get_adapter
 from .validation import validate_transformation
 
 
-def run_pipeline(cb: bytes, replacements=None, is_kt: bool = False,
-                 ext: str = '.java', max_rounds: int = 10) -> bytes:
+def run_pipeline(cb: bytes, replacements=None, *, ext: str = '.java',
+                 max_rounds: int = 10) -> bytes:
     """Run steps 1–4 in a convergence loop until no further changes occur."""
     _lang._current_ext = ext
     if replacements is None:
         replacements = []
+    adapter = get_adapter(ext)
     original = cb
     for _ in range(max_rounds):
         prev = cb
         if replacements:
-            cb = step1_replace(cb, replacements)
-        cb = step1b_propagate_locals(cb)
+            cb = step1_replace(cb, replacements, ext)
+        cb = step1b_propagate_locals(cb, ext)
         cb = step2_simple(cb)
         cb = step3_compound(cb)
-        if ext in ('.kt', '.kts'):
-            cb = kotlin_if_expr(cb)
-        cb = step4_if_blocks(cb, is_kt)
+        if adapter:
+            cb = adapter.simplify_language_expressions(cb)
+        cb = step4_if_blocks(
+            cb, adapter.preserve_branch_scope if adapter else True)
         cb = step1d_remove_unreachable(cb)
-        cb = step1c_remove_unused_bool_vars(cb)
+        cb = step1c_remove_unused_bool_vars(cb, ext)
         if cb == prev:
             break
     return validate_transformation(original, cb, ext)
@@ -58,7 +59,7 @@ def load_config(path: str) -> list[tuple[str, str]]:
     Structured (list of {pattern, value})::
 
         replacements:
-          - pattern: "INTL_FLAG"
+          - pattern: "FEATURE_FLAG"
             value: true
     """
     with open(path, 'r') as f:
@@ -93,8 +94,7 @@ def process_file(filepath: str, replacements: list[tuple[str, str]]) -> bool:
         ui.error(f"reading {filepath}: {e}")
         return False
 
-    is_kt = ext in ('.kt', '.kts')
-    new_cb = run_pipeline(cb, replacements, is_kt, ext)
+    new_cb = run_pipeline(cb, replacements, ext=ext)
 
     if new_cb != cb:
         with open(filepath, 'wb') as f:

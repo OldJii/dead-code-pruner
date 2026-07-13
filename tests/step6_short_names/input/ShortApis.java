@@ -1,10 +1,10 @@
 package regression;
 
-class ImageNetSpeedListener {
+class NetworkSpeedListener {
   static void bs() {}
 }
 
-class CropIwaLog {
+class SampleLog {
   static void d(String format, Object... args) {}
 
   static void e(String message, Throwable error) {}

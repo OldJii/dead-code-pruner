@@ -3,7 +3,7 @@
 // ============================================================
 
 void case1_1() {
-  doIntl();
+  doPrimary();
 }
 
 void case1_2() {
@@ -14,7 +14,7 @@ bool case1_3() {
 }
 
 void case1_4() {
-  var s = "intl";
+  var s = "primary";
   print(s);
 }
 
@@ -45,12 +45,12 @@ void case2_4() {
 // ============================================================
 
 void case3_1() {
-  var x = "intl";
+  var x = "primary";
   print(x);
 }
 
 void case3_2() {
-  var x = "intl";
+  var x = "primary";
   print(x);
 }
 
@@ -89,7 +89,7 @@ void case5_2() {
 }
 
 void case5_3() {
-  doIntl();
+  doPrimary();
 }
 
 // ============================================================
@@ -138,7 +138,7 @@ void case8_3() { var a = true; var b = false; }
 // ============================================================
 
 void case9_1() {
-  if (signUpType == "cosmos") {
+  if (flowMode == "special") {
     doComplex();
   } else {
     toEarlyUid();
@@ -161,7 +161,7 @@ void case10_1() { if (someCondition()) { doSomething(); } }
 void case10_2() { var b = isChinese; }
 void case10_3() { if (someCondition()) { doSomething(); } }
 void case10_4() { var b = someCondition; }
-void case10_5() { var s = "intl"; }
+void case10_5() { var s = "primary"; }
 
 // ============================================================
 // Group 11: Unreachable after return
@@ -191,11 +191,11 @@ void case12_1(bool flag) {
 // ============================================================
 
 void case13_1() {
-  doIntl();
+  doPrimary();
 }
 
 void case13_2() {
-  final result = "intl";
+  final result = "primary";
   print(result);
 }
 

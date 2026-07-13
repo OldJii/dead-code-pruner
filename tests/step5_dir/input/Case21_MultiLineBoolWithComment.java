@@ -5,10 +5,10 @@ class Case21 {
 
     public void test1() {
         // 场景: 最后一个条件变成 false，应移除该行和注释
-        if (!hasPrivilege()
+        if (!hasChoice()
             && freeRemaining() <= 0
-            // PayWall二期优化，不再弹购买弹框
-            && !PayController.isPayWallExp()) {
+            // Restriction二期优化，不再弹购买弹框
+            && !AccessFlagController.isRestrictionExperimentEnabled()) {
             showDialog();
             return false;
         }
@@ -16,10 +16,10 @@ class Case21 {
 
     public void test2() {
         // 场景: 最后一个条件变成 true，&& true 应消除
-        if (hasPrivilege()
+        if (hasChoice()
             || freeRemaining() > 0
-            // PayWall二期优化
-            || PayController.isPayWallExp()) {
+            // Restriction二期优化
+            || AccessFlagController.isRestrictionExperimentEnabled()) {
             showFeature();
         }
     }
@@ -27,7 +27,7 @@ class Case21 {
     public void test3() {
         // 场景: 中间条件变成 false
         if (conditionA()
-            && PayController.isPayWallExp()
+            && AccessFlagController.isRestrictionExperimentEnabled()
             && conditionB()) {
             doWork();
         }

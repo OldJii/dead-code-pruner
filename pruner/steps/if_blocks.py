@@ -5,7 +5,7 @@ boolean, inlining the live branch and deleting dead code after early exits.
 """
 
 import re
-from ..ast_utils import parse, find_all, find_if_nodes, get_if_parts, is_bool, bstr
+from ..ast_utils import parse, find_all, find_if_nodes, get_if_parts, is_bool
 
 _BLOCK_TYPES = frozenset({'block', 'statement_block', 'compound_statement'})
 
@@ -270,7 +270,7 @@ def _alt_text_b(alt_node, cb):
 
 # ── main entry ──────────────────────────────────────────────
 
-def step4_if_blocks(cb: bytes, is_kt: bool = False) -> bytes:
+def step4_if_blocks(cb: bytes, preserve_branch_scope: bool = True) -> bytes:
     for _ in range(500):
         root, cb = parse(cb)
         mod = False
@@ -394,7 +394,7 @@ def step4_if_blocks(cb: bytes, is_kt: bool = False) -> bytes:
                             inner_lines.pop()
                         inner_body = b'\n'.join(l.rstrip() for l in inner_lines)
                         reindented = _reindent_b(inner_body, indent)
-                        if _VAR_DECL_RE_B.search(inner_body) and not is_kt:
+                        if _VAR_DECL_RE_B.search(inner_body) and preserve_branch_scope:
                             rep = indent + b'{\n' + reindented + b'\n' + indent + b'}'
                         else:
                             rep = reindented
@@ -408,7 +408,7 @@ def step4_if_blocks(cb: bytes, is_kt: bool = False) -> bytes:
 
             elif value == 'true':
                 reindented = _reindent_b(body, indent)
-                keep_braces = bool(_VAR_DECL_RE_B.search(body)) and not is_kt
+                keep_braces = bool(_VAR_DECL_RE_B.search(body)) and preserve_branch_scope
                 if keep_braces:
                     rep = indent + b'{\n' + reindented + b'\n' + indent + b'}'
                 else:

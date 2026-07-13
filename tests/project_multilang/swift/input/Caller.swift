@@ -7,7 +7,7 @@ func run(_ c: Any) {
 
 func multiline(flag: Bool) {
   let isOneWay =
-      !INTL_FLAG
+      !FEATURE_FLAG
           && flag
           && other()
   use(isOneWay)

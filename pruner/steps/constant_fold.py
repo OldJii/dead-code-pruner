@@ -8,18 +8,10 @@ within the same file.
 
 import re
 
-_DECL_PREFIXES = (b'const ', b'var ', b'let ', b'val ', b'final ', b'#define ')
+from ..adapters import get_adapter
+from ..lang import _PARSERS
 
-_LOCAL_BOOL_PATTERNS = [
-    # Java: final boolean isX = true;
-    re.compile(rb'\bfinal\s+(?:boolean|Boolean)\s+(\w{3,})\s*=\s*(true|false)\s*;'),
-    # Kotlin: val isX = true  /  val isX: Boolean = true
-    re.compile(rb'\bval\s+(\w{3,})\s*(?::\s*(?:Boolean|Bool)\s*)?=\s*(true|false)\b'),
-    # Swift: let isX = true  /  let isX: Bool = true
-    re.compile(rb'\blet\s+(\w{3,})\s*(?::\s*Bool\s*)?=\s*(true|false)\b'),
-    # Dart: final isX = true;  /  final bool isX = true;  /  const isX = true;
-    re.compile(rb'\b(?:final|const)\s+(?:bool\s+)?(\w{3,})\s*=\s*(true|false)\s*;'),
-]
+_DECL_PREFIXES = (b'const ', b'var ', b'let ', b'val ', b'final ', b'#define ')
 
 _TYPE_NAMES = frozenset({
     b'Boolean', b'Bool', b'boolean', b'String', b'Int', b'Long',
@@ -27,77 +19,54 @@ _TYPE_NAMES = frozenset({
 })
 
 
+def _non_code_spans(content: bytes, ext: str) -> list[tuple[int, int]]:
+    """Return tree-sitter string/comment spans for one complete or partial file."""
+    parser = _PARSERS.get(ext)
+    if parser is None:
+        return []
+    root = parser.parse(content).root_node
+    spans: list[tuple[int, int]] = []
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        node_type = node.type.lower()
+        lexical = ('comment' in node_type or 'string' in node_type
+                   or node_type in {'character_literal', 'rune_literal'})
+        if lexical:
+            spans.append((node.start_byte, node.end_byte))
+            continue
+        stack.extend(node.named_children)
+    spans.sort()
+    merged: list[tuple[int, int]] = []
+    for start, end in spans:
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _masked_code(content: bytes, ext: str) -> bytes:
+    masked = bytearray(content)
+    for start, end in _non_code_spans(content, ext):
+        masked[start:end] = b' ' * (end - start)
+    return bytes(masked)
+
+
 def _tokenize_and_replace(content_bytes: bytes, pattern_bytes: bytes,
-                          replacement_bytes: bytes) -> bytes:
-    """Split content into (code, non-code) tokens, apply regex only to code."""
-    tokens = []
-    i = 0
-    n = len(content_bytes)
-    code_start = 0
-
-    while i < n:
-        if content_bytes[i:i+2] == b'/*':
-            if i > code_start:
-                tokens.append((True, content_bytes[code_start:i]))
-            end = content_bytes.find(b'*/', i + 2)
-            if end == -1:
-                end = n - 2
-            tokens.append((False, content_bytes[i:end + 2]))
-            i = end + 2
-            code_start = i
-            continue
-        if content_bytes[i:i+2] == b'//':
-            if i > code_start:
-                tokens.append((True, content_bytes[code_start:i]))
-            end = content_bytes.find(b'\n', i)
-            if end == -1:
-                end = n
-            tokens.append((False, content_bytes[i:end]))
-            i = end
-            code_start = i
-            continue
-        if content_bytes[i:i+1] == b'"':
-            if i > code_start:
-                tokens.append((True, content_bytes[code_start:i]))
-            j = i + 1
-            while j < n:
-                if content_bytes[j:j+1] == b'\\':
-                    j += 2
-                    continue
-                if content_bytes[j:j+1] == b'"':
-                    j += 1
-                    break
-                j += 1
-            tokens.append((False, content_bytes[i:j]))
-            i = j
-            code_start = i
-            continue
-        if content_bytes[i:i+1] == b"'":
-            if i > code_start:
-                tokens.append((True, content_bytes[code_start:i]))
-            j = i + 1
-            while j < n:
-                if content_bytes[j:j+1] == b'\\':
-                    j += 2
-                    continue
-                if content_bytes[j:j+1] == b"'":
-                    j += 1
-                    break
-                j += 1
-            tokens.append((False, content_bytes[i:j]))
-            i = j
-            code_start = i
-            continue
-        i += 1
-
-    if code_start < n:
-        tokens.append((True, content_bytes[code_start:]))
-
-    result = []
-    for is_code, chunk in tokens:
-        if is_code:
-            chunk = _replace_skip_decl(chunk, pattern_bytes, replacement_bytes)
-        result.append(chunk)
+                          replacement_bytes: bytes, ext: str) -> bytes:
+    """Apply a replacement only to tree-sitter-confirmed code spans."""
+    result: list[bytes] = []
+    position = 0
+    for start, end in _non_code_spans(content_bytes, ext):
+        if position < start:
+            result.append(_replace_skip_decl(
+                content_bytes[position:start], pattern_bytes, replacement_bytes))
+        result.append(content_bytes[start:end])
+        position = end
+    if position < len(content_bytes):
+        result.append(_replace_skip_decl(
+            content_bytes[position:], pattern_bytes, replacement_bytes))
     return b''.join(result)
 
 
@@ -148,10 +117,28 @@ def _replace_skip_decl(chunk: bytes, pattern: bytes, replacement: bytes) -> byte
     return out
 
 
-def step1_replace(cb: bytes, replacements: list) -> bytes:
+def step1_replace(cb: bytes, replacements: list, ext: str = '.java') -> bytes:
     """Replace configured constants, skipping comments and strings."""
     if not replacements:
         return cb
+    spans = _non_code_spans(cb, ext)
+    chunks: list[tuple[bool, bytes]] = []
+    position = 0
+    for start, end in spans:
+        if position < start:
+            chunks.append((True, cb[position:start]))
+        chunks.append((False, cb[start:end]))
+        position = end
+    if position < len(cb):
+        chunks.append((True, cb[position:]))
+    return b''.join(
+        _replace_configured_chunk(chunk, replacements) if is_code else chunk
+        for is_code, chunk in chunks
+    )
+
+
+def _replace_configured_chunk(cb: bytes, replacements: list) -> bytes:
+    """Reach a replacement fixed point inside one AST-confirmed code span."""
     changed = True
     while changed:
         changed = False
@@ -164,7 +151,7 @@ def step1_replace(cb: bytes, replacements: list) -> bytes:
             for pat in [rb'[a-zA-Z_][a-zA-Z0-9_.]*\.' + escaped + rb'\b',
                         rb'\b' + escaped + rb'\b']:
                 prev = cb
-                cb = _tokenize_and_replace(cb, pat, val_b)
+                cb = _replace_skip_decl(cb, pat, val_b)
                 if cb != prev:
                     changed = True
                     break
@@ -175,17 +162,20 @@ def step1_replace(cb: bytes, replacements: list) -> bytes:
 
 # ── Step 1b: local constant propagation ──────────────────────
 
-def _find_enclosing_scope(cb: bytes, pos: int) -> tuple[int, int]:
+def _find_enclosing_scope(cb: bytes, pos: int, ext: str,
+                          code: bytes | None = None) -> tuple[int, int]:
     """Find the ``{ ... }`` pair enclosing *pos*, skipping strings and comments.
 
     Returns ``(open_brace, close_brace)`` byte positions, or ``(-1, -1)``
     if no enclosing scope is found.
     """
+    if code is None:
+        code = _masked_code(cb, ext)
     depth = 0
     i = pos
     while i > 0:
         i -= 1
-        c = cb[i:i+1]
+        c = code[i:i+1]
         if c == b'}':
             depth += 1
         elif c == b'{':
@@ -198,34 +188,10 @@ def _find_enclosing_scope(cb: bytes, pos: int) -> tuple[int, int]:
 
     depth = 1
     j = pos
-    n = len(cb)
-    in_str = False
-    in_lc = False
-    in_bc = False
+    n = len(code)
     while j < n and depth > 0:
-        c = cb[j:j+1]
-        if in_lc:
-            if c == b'\n':
-                in_lc = False
-        elif in_bc:
-            if c == b'*' and j + 1 < n and cb[j+1:j+2] == b'/':
-                in_bc = False
-                j += 1
-        elif in_str:
-            if c == b'\\':
-                j += 1
-            elif c == b'"':
-                in_str = False
-        elif c == b'/' and j + 1 < n:
-            c2 = cb[j+1:j+2]
-            if c2 == b'/':
-                in_lc = True
-            elif c2 == b'*':
-                in_bc = True
-                j += 1
-        elif c == b'"':
-            in_str = True
-        elif c == b'{':
+        c = code[j:j+1]
+        if c == b'{':
             depth += 1
         elif c == b'}':
             depth -= 1
@@ -235,19 +201,22 @@ def _find_enclosing_scope(cb: bytes, pos: int) -> tuple[int, int]:
     return open_pos, j
 
 
-def _extract_scoped_bool_constants(cb: bytes) -> list[tuple[bytes, bytes, int, int, int, int]]:
+def _extract_scoped_bool_constants(
+        cb: bytes, patterns, ext: str) -> list[tuple[bytes, bytes, int, int, int, int]]:
     """Find immutable local boolean declarations with their enclosing scopes.
 
     Returns ``[(name, value, decl_start, decl_end, scope_start, scope_end), ...]``.
     """
     results = []
-    for pat in _LOCAL_BOOL_PATTERNS:
-        for m in pat.finditer(cb):
+    code = _masked_code(cb, ext)
+    for pat in patterns:
+        for m in pat.finditer(code):
             name = m.group(1)
             value = m.group(2)
             if name in _TYPE_NAMES:
                 continue
-            scope_start, scope_end = _find_enclosing_scope(cb, m.start())
+            scope_start, scope_end = _find_enclosing_scope(
+                cb, m.start(), ext, code)
             if scope_start < 0:
                 continue
             le = cb.find(b'\n', m.end())
@@ -256,22 +225,24 @@ def _extract_scoped_bool_constants(cb: bytes) -> list[tuple[bytes, bytes, int, i
     return results
 
 
-def step1b_propagate_locals(cb: bytes) -> bytes:
+def step1b_propagate_locals(cb: bytes, ext: str = '.java') -> bytes:
     """Propagate locally-declared immutable boolean constants to their uses.
 
-    Detects patterns like ``final boolean isIntl = false;`` or
+    Detects patterns like ``final boolean isPrimary = false;`` or
     ``val isDebug = true`` and replaces non-declaration uses of the
     variable within the same enclosing scope (function body).
     """
+    adapter = get_adapter(ext)
+    patterns = adapter.local_boolean_patterns if adapter else ()
     for _ in range(20):
-        constants = _extract_scoped_bool_constants(cb)
+        constants = _extract_scoped_bool_constants(cb, patterns, ext)
         if not constants:
             break
         prev = cb
         for name, value, _ds, decl_end, _ss, scope_end in constants:
             after_decl = cb[decl_end:scope_end]
             pat = rb'\b' + re.escape(name) + rb'\b'
-            new_after = _tokenize_and_replace(after_decl, pat, value)
+            new_after = _tokenize_and_replace(after_decl, pat, value, ext)
             if new_after != after_decl:
                 cb = cb[:decl_end] + new_after + cb[scope_end:]
                 break
@@ -282,27 +253,29 @@ def step1b_propagate_locals(cb: bytes) -> bytes:
 
 # ── Step 1c: unused local variable cleanup ───────────────────
 
-_BOOL_DECL_LINE = re.compile(
-    rb'^\s*final\s+(?:boolean|Boolean|bool|Bool)\s+(\w{3,})\s*=\s*(?:true|false)\s*;\s*$',
-    re.MULTILINE,
-)
-_IMMUTABLE_DECL_LINE = re.compile(
-    rb'^\s*(?:val|let|(?:final|const)\s+(?:bool\s+)?)\s*(\w{3,})\s*(?::\s*\w+\s*)?=\s*(?:true|false)\s*;?\s*$',
-    re.MULTILINE,
-)
-
-
-def step1c_remove_unused_bool_vars(cb: bytes) -> bytes:
+def step1c_remove_unused_bool_vars(cb: bytes, ext: str = '.java') -> bytes:
     """Remove declarations of boolean variables whose names no longer appear
     within the same enclosing scope."""
+    adapter = get_adapter(ext)
+    patterns = adapter.local_boolean_patterns if adapter else ()
     for _ in range(10):
         changed = False
-        for pat in (_BOOL_DECL_LINE, _IMMUTABLE_DECL_LINE):
-            for m in pat.finditer(cb):
+        code = _masked_code(cb, ext)
+        for pat in patterns:
+            for m in pat.finditer(code):
                 name = m.group(1)
                 if name in _TYPE_NAMES:
                     continue
-                scope_start, scope_end = _find_enclosing_scope(cb, m.start())
+                line_start = cb.rfind(b'\n', 0, m.start()) + 1
+                line_end = cb.find(b'\n', m.end())
+                if line_end < 0:
+                    line_end = len(cb)
+                prefix = cb[line_start:m.start()]
+                suffix = cb[m.end():line_end]
+                if prefix.strip() or suffix.strip(b' \t;'):
+                    continue
+                scope_start, scope_end = _find_enclosing_scope(
+                    cb, m.start(), ext, code)
                 if scope_start < 0:
                     continue
                 le = cb.find(b'\n', m.end())
@@ -310,8 +283,7 @@ def step1c_remove_unused_bool_vars(cb: bytes) -> bytes:
                 scope_rest = cb[decl_end:scope_end]
                 use_pat = re.compile(rb'\b' + re.escape(name) + rb'\b')
                 if not use_pat.search(scope_rest):
-                    ls = cb.rfind(b'\n', 0, m.start())
-                    ls = ls + 1 if ls >= 0 else 0
+                    ls = line_start
                     if le == -1:
                         le = len(cb)
                     else:

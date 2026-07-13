@@ -22,7 +22,8 @@ from ..ast_utils import parse, build_line_offsets
 from .method_scanner import scan_method_definitions
 from .field_scanner import scan_fields
 from .ref_index import (
-    REFERENCE_EXTS, iter_dynamic_reference_names, iter_reference_names,
+    REFERENCE_EXTS, iter_dynamic_reference_names,
+    iter_metadata_reference_names, iter_reference_names,
     iter_type_identifiers,
 )
 from .project_layout import ProjectLayout
@@ -35,21 +36,25 @@ def _scan_file_chunk(file_infos):
     """Process a chunk of files in a worker process.
 
     *file_infos* is a list of ``(filepath, ext, module_name)`` tuples.
-    Returns method/field data plus call, type, and dynamic-reference indices.
+    Returns method/field data plus call-shape, type, and dynamic-reference
+    indices.
     """
     methods = []
     fields_list = []
     ref_index: dict[str, set[str]] = defaultdict(set)
+    member_ref_index: dict[str, set[str]] = defaultdict(set)
     type_ref_index: dict[str, set[str]] = defaultdict(set)
     dynamic_ref_index: dict[str, set[str]] = defaultdict(set)
     contracts = ContractGraph()
     content_cache: dict[str, str] = {}
+    scan_errors: list[tuple[str, str]] = []
 
     for fp, ext, mod_name in file_infos:
         try:
             with open(fp, 'rb') as f:
                 cb = f.read()
-        except Exception:
+        except Exception as exc:
+            scan_errors.append((fp, f"read: {exc}"))
             continue
 
         content = cb.decode('utf-8', errors='replace')
@@ -64,24 +69,28 @@ def _scan_file_chunk(file_infos):
                 fp, cb, ext, module=mod_name,
                 root_node=root_node, line_offsets=line_offsets)
             methods.extend(file_methods)
-        except Exception:
-            pass
+        except Exception as exc:
+            scan_errors.append((fp, f"method scan: {exc}"))
 
         fields_list.extend(
             scan_fields(fp, cb, ext, module=mod_name,
                         root_node=root_node, line_offsets=line_offsets))
 
-        for name in iter_reference_names(content):
+        member_names: set[str] = set()
+        for name in iter_reference_names(content, member_names=member_names):
             ref_index[name].add(fp)
+        for name in member_names:
+            member_ref_index[name].add(fp)
         for name in iter_type_identifiers(content):
             type_ref_index[name].add(fp)
         for name in iter_dynamic_reference_names(content):
             dynamic_ref_index[name].add(fp)
 
-        contracts.ingest_file(content)
+        contracts.ingest_file(content, ext, fp)
 
-    return (methods, fields_list, dict(ref_index), dict(type_ref_index),
-            dict(dynamic_ref_index), contracts, content_cache)
+    return (methods, fields_list, dict(ref_index), dict(member_ref_index),
+            dict(type_ref_index), dict(dynamic_ref_index), contracts,
+            content_cache, scan_errors)
 
 
 # ── Result container ────────────────────────────────────────────
@@ -91,7 +100,7 @@ class ProjectScanResult:
 
     __slots__ = (
         'all_files', 'ref_files', 'dead_methods', 'all_methods', 'fields',
-        'variant_conflicts', 'ref_index', 'type_ref_index',
+        'variant_conflicts', 'ref_index', 'member_ref_index', 'type_ref_index',
         'dynamic_ref_index',
         'children_map', 'final_classes', 'iface_abstract',
         'implements', 'contracts', 'layout', 'elapsed',
@@ -106,6 +115,7 @@ class ProjectScanResult:
         self.fields: list[dict] = []
         self.variant_conflicts: set[tuple] = set()
         self.ref_index: dict[str, set[str]] = defaultdict(set)
+        self.member_ref_index: dict[str, set[str]] = defaultdict(set)
         self.type_ref_index: dict[str, set[str]] = defaultdict(set)
         self.dynamic_ref_index: dict[str, set[str]] = defaultdict(set)
         self.children_map: dict[str, set[str]] = defaultdict(set)
@@ -140,12 +150,15 @@ class ProjectScanResult:
         modified_set = set(modified_files)
         for name_set in self.ref_index.values():
             name_set -= modified_set
+        for name_set in self.member_ref_index.values():
+            name_set -= modified_set
         for name_set in self.type_ref_index.values():
             name_set -= modified_set
         for name_set in self.dynamic_ref_index.values():
             name_set -= modified_set
         for fp in modified_files:
             self.content_cache.pop(fp, None)
+        self.contracts.remove_files(modified_files)
 
         deleted = [fp for fp in modified_files if not os.path.exists(fp)]
         for fp in deleted:
@@ -166,7 +179,8 @@ class ProjectScanResult:
         # Incremental rounds contain far fewer files than the initial scan,
         # but each file still pays full tree-sitter/method/field/contract
         # analysis cost.  The old 500-file threshold forced typical
-        # 38–223-file rounds onto one core (22s–2m12s in the real project).
+        # Keep medium incremental rounds distributed instead of collapsing
+        # them onto one core.
         n_workers = min(os.cpu_count() or 1,
                         max(1, (len(file_infos) + _INCREMENTAL_FILES_PER_WORKER - 1)
                             // _INCREMENTAL_FILES_PER_WORKER))
@@ -193,8 +207,10 @@ class ProjectScanResult:
                 # fails, the sequential fallback must not duplicate records
                 # already merged from completed workers.
                 for partial in partials:
-                    (methods, fields, ref_idx, type_idx, dynamic_idx,
-                     contracts, cc) = partial
+                    (methods, fields, ref_idx, member_idx, type_idx, dynamic_idx,
+                     contracts, cc, scan_errors) = partial
+                    for fp, message in scan_errors:
+                        ui.warn(f"Skipped {fp}: {message}")
                     for m in methods:
                         self.all_methods.append(m)
                         if m.get('is_dead_candidate'):
@@ -202,6 +218,8 @@ class ProjectScanResult:
                     self.fields.extend(fields)
                     for name, fps in ref_idx.items():
                         self.ref_index[name].update(fps)
+                    for name, fps in member_idx.items():
+                        self.member_ref_index[name].update(fps)
                     for name, fps in type_idx.items():
                         self.type_ref_index[name].update(fps)
                     for name, fps in dynamic_idx.items():
@@ -247,13 +265,16 @@ class ProjectScanResult:
             self.fields.extend(
                 scan_fields(fp, cb, ext, module=mod_name,
                             root_node=root_node, line_offsets=line_offsets))
-            for name in iter_reference_names(content):
+            member_names: set[str] = set()
+            for name in iter_reference_names(content, member_names=member_names):
                 self.ref_index[name].add(fp)
+            for name in member_names:
+                self.member_ref_index[name].add(fp)
             for name in iter_type_identifiers(content):
                 self.type_ref_index[name].add(fp)
             for name in iter_dynamic_reference_names(content):
                 self.dynamic_ref_index[name].add(fp)
-            self.contracts.ingest_file(content)
+            self.contracts.ingest_file(content, ext, fp)
             if show_progress and ((idx + 1) % interval == 0 or idx + 1 == total):
                 ui.progress(idx + 1, total, "Incremental scanning")
         if show_progress:
@@ -309,8 +330,10 @@ def _scan_parallel(result: ProjectScanResult, file_infos: list,
                    for chunk in chunks}
         for future in as_completed(futures):
             chunk_len = futures[future]
-            (methods, fields, ref_idx, type_idx, dynamic_idx,
-             contracts, content_cache) = future.result()
+            (methods, fields, ref_idx, member_idx, type_idx, dynamic_idx,
+             contracts, content_cache, scan_errors) = future.result()
+            for fp, message in scan_errors:
+                ui.warn(f"Skipped {fp}: {message}")
 
             for m in methods:
                 result.all_methods.append(m)
@@ -322,6 +345,8 @@ def _scan_parallel(result: ProjectScanResult, file_infos: list,
 
             for name, fps in ref_idx.items():
                 result.ref_index[name].update(fps)
+            for name, fps in member_idx.items():
+                result.member_ref_index[name].update(fps)
             for name, fps in type_idx.items():
                 result.type_ref_index[name].update(fps)
             for name, fps in dynamic_idx.items():
@@ -377,14 +402,17 @@ def _scan_sequential(result: ProjectScanResult, file_infos: list,
             scan_fields(fp, cb, ext, module=mod_name,
                         root_node=root_node, line_offsets=line_offsets))
 
-        for name in iter_reference_names(content):
+        member_names: set[str] = set()
+        for name in iter_reference_names(content, member_names=member_names):
             result.ref_index[name].add(fp)
+        for name in member_names:
+            result.member_ref_index[name].add(fp)
         for name in iter_type_identifiers(content):
             result.type_ref_index[name].add(fp)
         for name in iter_dynamic_reference_names(content):
             result.dynamic_ref_index[name].add(fp)
 
-        result.contracts.ingest_file(content)
+        result.contracts.ingest_file(content, ext, fp)
 
 
 def _compute_variant_conflicts(result: ProjectScanResult) -> None:
@@ -461,6 +489,7 @@ def scan_project(root_dir: str, *, progress_interval: int = 500) -> ProjectScanR
             result.dead_methods.clear()
             result.fields.clear()
             result.ref_index.clear()
+            result.member_ref_index.clear()
             result.type_ref_index.clear()
             result.dynamic_ref_index.clear()
             result.contracts = ContractGraph()
@@ -484,6 +513,8 @@ def scan_project(root_dir: str, *, progress_interval: int = 500) -> ProjectScanR
             continue
         result.content_cache[fp] = content
         for name in iter_reference_names(content):
+            result.ref_index[name].add(fp)
+        for name in iter_metadata_reference_names(content):
             result.ref_index[name].add(fp)
         for name in iter_type_identifiers(content):
             result.type_ref_index[name].add(fp)

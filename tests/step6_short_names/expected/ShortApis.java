@@ -1,9 +1,9 @@
 package regression;
 
-class ImageNetSpeedListener {
+class NetworkSpeedListener {
 }
 
-class CropIwaLog {
+class SampleLog {
   static void d(String format, Object... args) {}
 
   static void e(String message, Throwable error) {}
@@ -16,6 +16,7 @@ class XmlCallbacks {
 
 class FieldConstantsA {
   public static final String LIVE = "live"; // trailing comment must not bind forward
+  public static final String DEAD = "dead"; // genuinely unused
   public static final String SHARED = "a";
 
   boolean isLive(String value) {

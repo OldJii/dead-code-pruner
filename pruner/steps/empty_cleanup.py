@@ -9,10 +9,10 @@ no code (only package/import declarations) are deleted.
 import os
 import re
 
-from ..ast_utils import parse, find_all, find_all_multi, txt, build_line_offsets, byte_to_line
+from ..ast_utils import parse, find_all_multi, txt, build_line_offsets, byte_to_line
 from ..lang import _PARSERS, SKIP_DIRS
 from .. import ui
-from ..analysis.ref_index import build_ref_index
+from ..analysis.ref_index import REFERENCE_EXTS
 from ..validation import validate_transformation
 
 _CLASS_NODE_TYPES = frozenset({
@@ -84,7 +84,7 @@ def _is_class_empty(node, cb: bytes) -> bool:
 
 
 def _class_referenced_in_project(class_name: str, own_file: str,
-                                  all_files: list[str],
+                                  reference_files: list[str],
                                   decl_start: int, decl_end: int,
                                   ref_index: dict[str, set[str]] | None = None,
                                   ) -> bool:
@@ -99,7 +99,7 @@ def _class_referenced_in_project(class_name: str, own_file: str,
     if ref_index is not None:
         candidates = ref_index.get(class_name, set())
     else:
-        candidates = all_files
+        candidates = reference_files
 
     for fp in candidates:
         try:
@@ -138,26 +138,35 @@ def _file_has_only_imports(content: str) -> bool:
     return True
 
 
-def step7_empty_cleanup(root_dir: str, dry_run: bool = False) -> dict:
+def step7_empty_cleanup(root_dir: str, dry_run: bool = False, *,
+                        show_header: bool = True) -> dict:
     """Remove empty classes and delete empty files.
 
     Returns ``{'classes_removed': int, 'files_deleted': int}``.
     """
     import time
     t0 = time.time()
-    ui.section("Step 7  Empty Class & File Cleanup")
+    if show_header:
+        ui.section("Empty Class & File Cleanup")
+    else:
+        ui.stage("Cleaning empty classes and files")
 
-    all_files: list[str] = []
+    source_files: list[str] = []
+    reference_files: list[str] = []
     for dp, dns, fns in os.walk(root_dir):
         dns[:] = [d for d in dns if d not in SKIP_DIRS]
         for fn in fns:
             ext = os.path.splitext(fn)[1].lower()
             if ext in _PARSERS:
-                all_files.append(os.path.join(dp, fn))
+                fp = os.path.join(dp, fn)
+                source_files.append(fp)
+                reference_files.append(fp)
+            elif ext in REFERENCE_EXTS:
+                reference_files.append(os.path.join(dp, fn))
 
     empty_classes: list[tuple[str, str, int, int]] = []
-    total_files = len(all_files)
-    for idx, fp in enumerate(all_files):
+    total_files = len(source_files)
+    for idx, fp in enumerate(source_files):
         ui.progress(idx + 1, total_files, "Scanning for empty classes")
         ext = os.path.splitext(fp)[1].lower()
         try:
@@ -196,8 +205,10 @@ def step7_empty_cleanup(root_dir: str, dry_run: bool = False) -> dict:
     class_ref_index: dict[str, set[str]] = {}
     cn_pat = re.compile(
         r'\b(' + '|'.join(re.escape(n) for n in class_names_needed) + r')\b')
-    for idx, fp in enumerate(all_files):
-        ui.progress(idx + 1, total_files, "Indexing empty-class references")
+    total_reference_files = len(reference_files)
+    for idx, fp in enumerate(reference_files):
+        ui.progress(idx + 1, total_reference_files,
+                    "Indexing empty-class references")
         try:
             with open(fp, 'r', encoding='utf-8', errors='ignore') as f:
                 content = f.read()
@@ -216,7 +227,7 @@ def step7_empty_cleanup(root_dir: str, dry_run: bool = False) -> dict:
         ui.progress(idx + 1, total_candidates,
                     "Validating empty-class references",
                     f"{len(removable)} removable")
-        if _class_referenced_in_project(class_name, fp, all_files,
+        if _class_referenced_in_project(class_name, fp, reference_files,
                                          start_line, end_line,
                                          ref_index=class_ref_index):
             continue

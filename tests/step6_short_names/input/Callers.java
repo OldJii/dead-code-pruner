@@ -2,12 +2,12 @@ package regression;
 
 class Callers {
   void fetch() {
-    ImageNetSpeedListener.bs();
+    NetworkSpeedListener.bs();
   }
 
   void load(String uri, Throwable error) {
-    CropIwaLog.d("load {%s}", uri);
-    CropIwaLog.e(error.getMessage(), error);
+    SampleLog.d("load {%s}", uri);
+    SampleLog.e(error.getMessage(), error);
   }
 
   String shared() {

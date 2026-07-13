@@ -1,6 +1,6 @@
 package demo
 
-const INTL_FLAG = true // placeholder overwritten by pruner pattern
+const FEATURE_FLAG = true // placeholder overwritten by pruner pattern
 
 func deadUnexported() bool {
 	return false
@@ -12,7 +12,7 @@ func LiveExported() {
 
 func Multiline(flag bool) {
 	isOneWay :=
-		!INTL_FLAG &&
+		!FEATURE_FLAG &&
 			flag &&
 			other()
 	use(isOneWay)

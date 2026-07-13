@@ -1,0 +1,13 @@
+{
+  "invoke_virtual": [
+    {
+      "destDefineClass": "Lcom/example/GeneratedBridgeMethods;",
+      "methods": [
+        {
+          "methodName": "registerNetworkCallback",
+          "returnType": "V"
+        }
+      ]
+    }
+  ]
+}

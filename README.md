@@ -21,13 +21,13 @@ replacements:
     value: false
 ```
 
-The tool runs a **3-phase + cleanup pipeline** that loops until no more changes are found:
+The tool runs a **3-phase + cleanup pipeline**. Per-file work reaches a fixed point internally; project-level cleanup then iterates only over files changed by the previous round:
 
 | Phase | Steps | Purpose |
 |-------|-------|---------|
-| **1** | Constant fold → local propagation → bool simplify → compound bool → if-block eliminate → unreachable removal → unused var cleanup | Replace flags and simplify control flow |
-| **2** | Inline constant-return methods → cascade simplify | Remove `return true/false/null/"str"/42` helpers |
-| **3** | Dead method and unused field cleanup → cascade simplify | Remove empty methods, orphaned definitions, and safely-unreferenced fields |
+| **1** | Constant fold → local propagation → bool simplify → compound bool → if-block eliminate → unreachable removal → unused var cleanup | One project pass; every file converges internally |
+| **2** | Constant-return method inlining → cascade simplify | Available as an isolated phase; merged into Phase 3 in the default full run |
+| **3** | Unified scan → constant/empty and adapter-approved method cleanup → private field cleanup → incremental re-scan | Remove declarations and converge project-wide without repeated full scans |
 | **Cleanup** | Empty class detection → reference check → removal | Remove classes left empty after method deletion |
 
 Each phase can trigger new simplification opportunities in earlier steps — the pipeline converges automatically.
@@ -65,20 +65,20 @@ Each phase can trigger new simplification opportunities in earlier steps — the
 | Kotlin if-expression (assignment) | `val x = if (false) A else B` | `val x = B` |
 | Boolean-to-string concat | `true + ""` | `"true"` |
 | Redundant paren unwrap | `(true)` | `true` |
-| Local constant propagation | `final boolean isIntl = true; if (isIntl)` | `if (true)` → eliminated |
-| Unused boolean var cleanup | `final boolean isIntl = true;` (no remaining uses) | *(removed)* |
+| Local constant propagation | `final boolean isPrimary = true; if (isPrimary)` | `if (true)` → eliminated |
+| Unused boolean var cleanup | `final boolean isPrimary = true;` (no remaining uses) | *(removed)* |
 
 ### Phase 2: Constant-Return Method Inlining
 
 | Transformation | Description |
 |---|---|
 | Boolean method inlining | `private fun isEnabled(): Boolean = true` → all `isEnabled()` replaced with `true` |
-| String/int/null method inlining | `private static String getRegion() { return "intl"; }` → replaced with `"intl"` |
+| String/int/null method inlining | `private static String getRegion() { return "primary"; }` → replaced with `"primary"` |
 | Static method inlining | `static boolean isOldMode() { return false; }` → `ClassName.isOldMode()` replaced with `false` |
 | Cascade simplification | After inlining, Phase 1 re-runs to simplify newly-constant expressions |
 | Private method deletion | After all call sites are inlined, the now-orphaned method definition is removed |
 
-Supported constant return types: `boolean`, `int`, `long`, `float`, `double`, `String`, `null`/`nil`, negative numeric literals.
+Supported inlined return types: `boolean`, `int`, `long`, `float`, `double`, `String`, and negative numeric literals. `null`/`nil` returns are detected but not substituted at call sites because the required target type is not inferred.
 
 ### Phase 3: Dead Member Cleanup
 
@@ -113,21 +113,23 @@ The tool is **conservative by design** — when in doubt, code is kept.
 | **Native methods** | `native void jni_call();` | JNI/FFI binding |
 | **Framework lifecycle methods** | `onCreate`, `viewDidLoad`, `build`, `main`, `init`, `ServeHTTP` | Language adapter protects them by name |
 | **Go exported functions** | `func HandleRequest(...)` (uppercase) | Part of public API |
-| **Dart private naming** | `_helper()` is treated as file-private but not force-deleted | Only deleted when provably unreferenced |
+| **Dart private naming** | `_helper()` is library-private | Constant/empty cleanup is supported; arbitrary bodies remain unless the adapter can prove every reference form |
 | **Dynamic references** | `#selector(doAction)`, `android:onClick`, XML `action`/`selector` attributes | Layout, Storyboard, and generated callback references are scanned |
 | **Static and inherited calls** | Java/Kotlin static imports and calls through subclasses | Project indexes resolve imported and transitively inherited members |
 | **Short symbol names** | Methods such as `d()`, `e()`, or `bs()` | Short names participate in the same reference checks as other symbols |
-| **Methods with parameters** | Any method requiring arguments | Not supported for inlining (no argument analysis) |
+| **Calls with parameters** | `helper(expensiveArg())` | Call sites are never substituted; arbitrary definitions require explicit adapter approval before zero-reference deletion |
 | **Public methods with callers** | Referenced from other files or via reflection | Cross-file reference analysis prevents deletion |
 | **Multi-variant methods** | Same name returns different values in different source sets | Source-set conflict detection skips them |
 
 ### Language Adapter Protection
 
-Each language has a dedicated adapter (`pruner/adapters/`) that defines:
+Each language has a dedicated adapter (`pruner/adapters/`) that owns:
 
 - **Protected method names**: lifecycle hooks, framework callbacks, runtime-required entry points
 - **Visibility rules**: Go unexported = safe, Dart `_` prefix = file-private, Swift `fileprivate` = file-scoped
-- **Entry-point detection**: Go test functions (`Test*`, `Benchmark*`), main functions, interface implementations
+- **Syntax normalization**: exact parameter arity, receiver/declaring type, callable and field node shapes
+- **Contract extraction**: Java/Kotlin interfaces, Go structural interfaces, Swift protocols, Dart abstract/implements relationships
+- **Language transforms**: immutable local booleans, Kotlin `if` expressions, and branch-scope rules
 
 ## Quick Start
 
@@ -221,7 +223,10 @@ pruner/
 ├── config.py           Configuration file discovery
 ├── adapters/           Language-specific safety rules
 │   ├── base.py            Abstract adapter interface
-│   ├── java_kotlin.py     Android / JVM server lifecycle & DI
+│   ├── java.py            Java / Android syntax, contracts, and entry points
+│   ├── kotlin.py          Kotlin syntax, contracts, and if expressions
+│   ├── jvm_common.py      Callbacks shared by Java and Kotlin
+│   ├── contract_utils.py  Grammar-neutral contract parsing helpers
 │   ├── go.py              Go visibility & testing conventions
 │   ├── swift.py           UIKit / SwiftUI / Storyboard safety
 │   └── dart.py            Flutter widget lifecycle & naming
@@ -238,18 +243,18 @@ pruner/
 └── analysis/           Project-level analysis
     ├── method_scanner.py     AST method detection (adapter-aware)
     ├── field_scanner.py      Conservative unused-field detection
-    ├── contracts.py          Shared analysis result contracts
+    ├── contracts.py          Incremental per-file contract graph
     ├── project_scan.py       Unified single-pass project scan
     ├── project_layout.py     Multi-module project detection
     ├── ref_index.py          Cross-file reference index
     ├── text_index.py         Compact textual and dynamic-reference index
-    ├── class_hierarchy.py    Inheritance analysis
     └── code_edit.py          Call-site replacement & deletion
 ```
 
 ## Safety Mechanisms
 
 - **AST-precise**: tree-sitter precisely distinguishes code from comments and strings
+- **Language-native literals**: Java/Kotlin text blocks, Go raw strings, Swift extended strings, Dart raw strings, and interpolation boundaries are protected
 - **AST validation gate**: every transformation is validated — changes that introduce new parse errors are automatically rolled back
 - **Per-file rollback**: project-level method, field, and empty-class edits are parsed again before being committed to disk
 - **Language adapters**: each ecosystem has dedicated entry-point and visibility rules (lifecycle methods, annotations, naming conventions)
@@ -263,15 +268,17 @@ pruner/
 - **Java switch-safe**: shared switch-scope declarations are preserved or hoisted when a constant branch exits early
 - **Dangling reference check**: methods are only deleted after verifying no remaining call sites exist
 - **Module-aware**: multi-module projects (Gradle, Go, Dart) track methods per module to avoid cross-module name collision
+- **Exact dry-run**: runs the real converging pipeline in an isolated copy, including cascades, without writing through source-tree symlinks
+- **Synthetic fixtures only**: tests and documentation use generic packages, identifiers, paths, scenarios, and measurements; source material from external projects must be anonymized before inclusion
 - **Quality gate**: pipeline summary reports rejected file edits and line change statistics
 - **Conservative by design**: when in doubt, the method is kept
 
 ## Performance and Progress
 
-- Project sources are parsed through a unified scan and compact reference indexes, avoiding repeated whole-project work.
+- Phase 1 processes the project once because each file already converges internally; Phase 3 parses project sources through one unified scan and incrementally refreshes changed files.
 - CPU-heavy scans use parallel workers on sufficiently large projects, while incremental rounds only revisit changed files.
-- Long-running stages continuously update one in-place terminal progress line. Completed stages end that line before normal logs continue, so redirected and interactive output remain readable.
-- A representative 19,668-file Android project improved from roughly 53 minutes to 12–15 minutes for a full cleanup run. Actual time depends on hardware, filesystem cache, and the number of convergence rounds.
+- Output has one hierarchy—Phase → Round → Stage—and every percentage stage continuously rewrites one terminal line. Redirected output emits only the final state for each stage.
+- Runtime depends on project size, filesystem cache, and convergence rounds; large initial scans use multiple processes and later rounds only revisit modified files.
 
 ## Requirements
 
@@ -282,12 +289,14 @@ pruner/
 
 ```bash
 python3 tests/run_tests.py           # 5-language step 1–4 tests
-python3 tests/run_project_tests.py   # 10 project-level safety and cleanup suites
+python3 tests/run_project_tests.py   # 14 project-level safety and cleanup suites
+python3 tests/test_language_matrix.py # 5-language syntax/safety/project parity matrix
+python3 tests/test_ui.py             # in-place progress and hierarchy rendering
 ```
 
 ## Limitations
 
-- Local constant propagation is limited to immutable boolean declarations (`final boolean`, `val`, `let`, `final bool`)
+- Local propagation is limited to immutable booleans (`final boolean`, Kotlin `val`, Go `const`, Swift `let`, Dart `final`/`const`)
 - Dead member detection is conservative — annotated, public, generated, dynamically referenced, or otherwise ambiguous declarations are preserved
 - Only single-return-statement methods are inlined (no multi-statement constant-return analysis)
 - Does not analyse method parameters for side effects

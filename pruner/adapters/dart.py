@@ -7,7 +7,10 @@ widgets have a well-defined lifecycle (``build``, ``initState``,
 
 from __future__ import annotations
 
+import re
+
 from .base import BaseAdapter
+from .contract_utils import declared_bodies, split_type_list
 
 _PROTECTED_NAMES: frozenset[str] = frozenset({
     # ── Dart entry ──
@@ -33,11 +36,13 @@ _PROTECTED_NAMES: frozenset[str] = frozenset({
     'mapEventToState', 'listen',
 })
 
-_PROTECTED_ANNOTATION_PREFIXES: frozenset[str] = frozenset({
-    '@override', '@visibleForTesting', '@required',
-    '@protected', '@mustCallSuper', '@immutable',
-    '@pragma',
-})
+_LOCAL_BOOL = re.compile(
+    rb'\b(?:final|const)\s+(?:bool\s+)?(\w{3,})\s*=\s*(true|false)\s*;')
+_TYPE_DECL = re.compile(
+    r'\b(?:(abstract|final|sealed|base)\s+)?class\s+(\w+)\s*([^\{]*)\{')
+_ABSTRACT_BODY = re.compile(r'\babstract\s+class\s+(\w+)\b[^\{]*\{')
+_ABSTRACT_METHOD = re.compile(
+    r'(?m)^\s*(?:[\w<>?,\[\]]+\s+)(\w+)\s*\([^;{]*\)\s*;')
 
 
 class DartAdapter(BaseAdapter):
@@ -47,8 +52,96 @@ class DartAdapter(BaseAdapter):
         return _PROTECTED_NAMES
 
     @property
-    def protected_annotation_prefixes(self) -> frozenset[str]:
-        return _PROTECTED_ANNOTATION_PREFIXES
+    def method_node_types(self) -> frozenset[str]:
+        return frozenset({'method_signature', 'function_signature'})
+
+    @property
+    def field_node_types(self) -> frozenset[str]:
+        return frozenset({'declaration'})
+
+    def field_names(self, declaration, content: bytes) -> list[str] | None:
+        names: list[str] = []
+        stack = list(declaration.named_children)
+        while stack:
+            node = stack.pop()
+            if node.type in ('initialized_identifier', 'static_final_declaration'):
+                identifier = next((c for c in node.named_children
+                                   if c.type == 'identifier'), None)
+                if identifier is not None:
+                    names.append(content[identifier.start_byte:identifier.end_byte].decode())
+                continue
+            stack.extend(node.named_children)
+        return names
+
+    def field_traits(self, declaration, content: bytes) -> dict:
+        raw = content[declaration.start_byte:declaration.end_byte]
+        return {'final': b'const ' in raw or b'final ' in raw,
+                'static': b'static ' in raw}
+
+    @property
+    def local_boolean_patterns(self):
+        return (_LOCAL_BOOL,)
+
+    def parameter_count(self, declaration, content: bytes) -> int | None:
+        signature = declaration
+        if declaration.type == 'method_signature' and declaration.named_children:
+            signature = declaration.named_children[0]
+        params = next((c for c in signature.named_children
+                       if c.type == 'formal_parameter_list'), None)
+        if params is None:
+            return None
+
+        def count(node) -> int:
+            if node.type in ('formal_parameter', 'default_formal_parameter'):
+                return 1
+            return sum(count(child) for child in node.named_children)
+
+        return count(params)
+
+    def accepts_method_node(self, declaration) -> bool:
+        return not (declaration.type == 'function_signature'
+                    and declaration.parent is not None
+                    and declaration.parent.type == 'method_signature')
+
+    def method_name(self, declaration, content: bytes) -> str | None:
+        signature = declaration
+        if declaration.type == 'method_signature' and declaration.named_children:
+            signature = declaration.named_children[0]
+        name = signature.child_by_field_name('name')
+        if name is None:
+            return None
+        return content[name.start_byte:name.end_byte].decode('utf-8', errors='ignore')
+
+    def method_body(self, declaration):
+        owner = declaration
+        if declaration.type == 'function_signature' and declaration.parent is not None:
+            owner = declaration
+        parent = owner.parent
+        if parent is None:
+            return None
+        siblings = parent.named_children
+        for index, sibling in enumerate(siblings):
+            if sibling.id == owner.id and index + 1 < len(siblings):
+                candidate = siblings[index + 1]
+                if candidate.type == 'function_body':
+                    return candidate
+                break
+        return None
+
+    def declaration_end_byte(self, declaration, body) -> int:
+        return body.end_byte if body is not None else declaration.end_byte
+
+    def return_type_text(self, declaration, content: bytes) -> str | None:
+        signature = declaration
+        if declaration.type == 'method_signature' and declaration.named_children:
+            signature = declaration.named_children[0]
+        if not signature.named_children:
+            return None
+        first = signature.named_children[0]
+        if first.type in ('void_type', 'type_identifier', 'nullable_type'):
+            return content[first.start_byte:first.end_byte].decode(
+                'utf-8', errors='ignore')
+        return None
 
     def is_entry_point(self, record: dict) -> bool:
         name = record.get('name', '')
@@ -67,3 +160,28 @@ class DartAdapter(BaseAdapter):
             return True
         mods = record.get('all_mods', set())
         return 'static' in mods
+
+    def contract_facts(self, content: str) -> dict:
+        facts = super().contract_facts(content)
+        for match in _TYPE_DECL.finditer(content):
+            modifier, name, tail = match.groups()
+            if modifier in ('final', 'sealed'):
+                facts['final'].add(name)
+            if modifier == 'abstract':
+                facts['contracts'].add(name)
+            parents: list[str] = []
+            for keyword in ('extends', 'implements', 'with'):
+                rel = re.search(
+                    rf'\b{keyword}\s+(.+?)(?=\bextends\b|\bimplements\b|\bwith\b|$)',
+                    tail)
+                if rel:
+                    parents.extend(split_type_list(rel.group(1)))
+            if parents:
+                facts['relations'][name] = set(parents)
+            if 'implements' in tail:
+                facts['implementors'].add(name)
+        for name, body in declared_bodies(content, _ABSTRACT_BODY):
+            facts['methods'][name] = {
+                m.group(1) for m in _ABSTRACT_METHOD.finditer(body)
+            }
+        return facts

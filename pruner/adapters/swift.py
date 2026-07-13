@@ -6,7 +6,10 @@ Codable, and Objective-C interop.
 
 from __future__ import annotations
 
+import re
+
 from .base import BaseAdapter
+from .contract_utils import declared_bodies, split_type_list
 
 _PROTECTED_NAMES: frozenset[str] = frozenset({
     # ── UIKit ViewController lifecycle ──
@@ -47,14 +50,12 @@ _PROTECTED_NAMES: frozenset[str] = frozenset({
     'hash',
 })
 
-_PROTECTED_ANNOTATION_PREFIXES: frozenset[str] = frozenset({
-    '@objc', '@IBAction', '@IBOutlet', '@IBDesignable', '@IBInspectable',
-    '@available', '@discardableResult',
-    '@Published', '@State', '@Binding', '@ObservedObject',
-    '@EnvironmentObject', '@StateObject', '@Environment',
-    '@main', '@UIApplicationMain',
-    '@testable',
-})
+_LOCAL_BOOL = re.compile(
+    rb'\blet\s+(\w{3,})\s*(?::\s*Bool\s*)?=\s*(true|false)\b')
+_TYPE_DECL = re.compile(
+    r'\b(?:(final)\s+)?(class|struct|actor|protocol)\s+(\w+)\s*([^\{]*)\{')
+_PROTOCOL_BODY = re.compile(r'\bprotocol\s+(\w+)\b[^\{]*\{')
+_PROTOCOL_METHOD = re.compile(r'(?m)^\s*(?:[\w@]+\s+)*func\s+(\w+)\s*\(')
 
 
 class SwiftAdapter(BaseAdapter):
@@ -64,12 +65,24 @@ class SwiftAdapter(BaseAdapter):
         return _PROTECTED_NAMES
 
     @property
-    def protected_annotation_prefixes(self) -> frozenset[str]:
-        return _PROTECTED_ANNOTATION_PREFIXES
-
-    @property
     def reference_file_extensions(self) -> frozenset[str]:
         return frozenset({'.storyboard', '.xib', '.plist'})
+
+    @property
+    def local_boolean_patterns(self):
+        return (_LOCAL_BOOL,)
+
+    @property
+    def field_node_types(self) -> frozenset[str]:
+        return frozenset({'property_declaration'})
+
+    def field_traits(self, declaration, content: bytes) -> dict:
+        raw = content[declaration.start_byte:declaration.end_byte]
+        return {'final': b'let ' in raw}
+
+    def parameter_count(self, declaration, content: bytes) -> int | None:
+        params = [c for c in declaration.named_children if c.type == 'parameter']
+        return len(params)
 
     def is_entry_point(self, record: dict) -> bool:
         name = record.get('name', '')
@@ -87,3 +100,24 @@ class SwiftAdapter(BaseAdapter):
         if 'private' in mods or 'fileprivate' in mods:
             return True
         return 'static' in mods
+
+    def contract_facts(self, content: str) -> dict:
+        facts = super().contract_facts(content)
+        for match in _TYPE_DECL.finditer(content):
+            is_final, kind, name, tail = match.groups()
+            if is_final:
+                facts['final'].add(name)
+            if kind == 'protocol':
+                facts['contracts'].add(name)
+            tail = tail.strip()
+            if tail.startswith(':'):
+                parents = split_type_list(tail[1:])
+                if parents:
+                    facts['relations'][name] = set(parents)
+                    if kind != 'protocol':
+                        facts['implementors'].add(name)
+        for name, body in declared_bodies(content, _PROTOCOL_BODY):
+            facts['methods'][name] = {
+                m.group(1) for m in _PROTOCOL_METHOD.finditer(body)
+            }
+        return facts

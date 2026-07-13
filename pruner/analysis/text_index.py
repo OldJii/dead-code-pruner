@@ -56,41 +56,89 @@ def _build_spans(content: str) -> list[tuple[int, int]]:
                 continue
             if c2 == '*':
                 start = i
-                end = content.find('*/', i + 2)
-                i = end + 2 if end != -1 else n
+                depth = 1
+                i += 2
+                while i < n and depth:
+                    if content.startswith('/*', i):
+                        depth += 1
+                        i += 2
+                    elif content.startswith('*/', i):
+                        depth -= 1
+                        i += 2
+                    else:
+                        i += 1
                 spans.append((start, i))
                 continue
 
+        # Go raw strings.  Backticks are not interpolation containers.
+        if c == '`':
+            end = content.find('`', i + 1)
+            end = n if end < 0 else end + 1
+            spans.append((i, end))
+            i = end
+            continue
+
+        # Swift extended string delimiters: #"..."#, ##"""..."""##.
+        if c == '#':
+            hash_end = i
+            while hash_end < n and content[hash_end] == '#':
+                hash_end += 1
+            if hash_end < n and content[hash_end] in ('"', "'"):
+                hashes = content[i:hash_end]
+                quote = content[hash_end]
+                delimiter = quote * (3 if content.startswith(quote * 3, hash_end) else 1)
+                string_spans, i = _scan_string(
+                    content, i, hash_end + len(delimiter), delimiter + hashes,
+                    swift_interp='\\' + hashes + '(', brace_interp=False,
+                    escapes=False)
+                spans.extend(string_spans)
+                continue
+
         if c in ('"', "'"):
-            quote = c
-            start = i
-            i += 1
-            while i < n:
-                ch = content[i]
-                if ch == '\\':
-                    if quote == '"' and i + 1 < n and content[i + 1] == '(':
-                        spans.append((start, i))
-                        i = _skip_swift_interp(content, i + 2)
-                        start = i
-                        continue
-                    i += 2
-                    continue
-                if ch == '$' and quote == '"' and i + 1 < n and content[i + 1] == '{':
-                    spans.append((start, i))
-                    i = _skip_brace_interp(content, i + 2)
-                    start = i
-                    continue
-                if ch == quote:
-                    i += 1
-                    break
-                i += 1
-            if start < i:
-                spans.append((start, i))
+            delimiter = c * (3 if content.startswith(c * 3, i) else 1)
+            raw_prefix = i > 0 and content[i - 1] in ('r', 'R')
+            string_spans, i = _scan_string(
+                content, i, i + len(delimiter), delimiter,
+                swift_interp='\\(', brace_interp=not raw_prefix,
+                escapes=not raw_prefix)
+            spans.extend(string_spans)
             continue
 
         i += 1
 
     return spans
+
+
+def _scan_string(content: str, start: int, position: int, closing: str, *,
+                 swift_interp: str, brace_interp: bool,
+                 escapes: bool) -> tuple[list[tuple[int, int]], int]:
+    """Scan one string and expose interpolation expressions as code gaps."""
+    spans: list[tuple[int, int]] = []
+    span_start = start
+    n = len(content)
+    i = position
+    while i < n:
+        if content.startswith(closing, i):
+            i += len(closing)
+            spans.append((span_start, i))
+            return spans, i
+        if swift_interp and content.startswith(swift_interp, i):
+            spans.append((span_start, i))
+            i = _skip_swift_interp(content, i + len(swift_interp))
+            span_start = i
+            continue
+        if brace_interp and content.startswith('${', i):
+            spans.append((span_start, i))
+            i = _skip_brace_interp(content, i + 2)
+            span_start = i
+            continue
+        if escapes and content[i] == '\\':
+            i += 2
+        else:
+            i += 1
+    if span_start < n:
+        spans.append((span_start, n))
+    return spans, n
 
 
 def _skip_brace_interp(content: str, i: int) -> int:

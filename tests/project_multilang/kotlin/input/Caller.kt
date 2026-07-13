@@ -8,7 +8,7 @@ fun run(c: Any) {
 
 fun multiline(flag: Boolean) {
   val isOneWay =
-      !INTL_FLAG
+      !FEATURE_FLAG
           && flag
           && other()
   use(isOneWay)

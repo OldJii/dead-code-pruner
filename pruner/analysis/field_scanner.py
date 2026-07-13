@@ -14,6 +14,7 @@ from ..ast_utils import (
     parse, txt, find_all, find_all_multi, build_line_offsets, byte_to_line,
 )
 from .. import lang as _lang
+from ..adapters import get_adapter
 
 _FIELD_NODE_TYPES = (
     'field_declaration', 'property_declaration', 'const_declaration',
@@ -169,7 +170,11 @@ def scan_fields(filepath: str, cb: bytes, ext: str,
     fields: list[dict] = []
     source_set = _source_set(filepath)
 
-    for node in find_all_multi(root_node, _FIELD_NODE_SET):
+    adapter = get_adapter(ext)
+    field_node_types = adapter.field_node_types if adapter else _FIELD_NODE_SET
+    class_node_types = adapter.class_node_types if adapter else frozenset(_CLASS_NODE_TYPES)
+
+    for node in find_all_multi(root_node, field_node_types):
             p = node.parent
             in_method = False
             while p:
@@ -182,7 +187,7 @@ def scan_fields(filepath: str, cb: bytes, ext: str,
                                    'constructor_declaration', 'init_declaration'):
                         in_method = True
                         break
-                if p.type in _CLASS_NODE_TYPES:
+                if p.type in class_node_types:
                     break
                 p = p.parent
             if in_method:
@@ -194,17 +199,22 @@ def scan_fields(filepath: str, cb: bytes, ext: str,
             if class_type == 'interface_declaration' and 'static' not in mods:
                 pass
 
-            for name in _field_names(node, cb):
+            adapter_names = adapter.field_names(node, cb) if adapter else None
+            traits = adapter.field_traits(node, cb) if adapter else {}
+            for name in adapter_names if adapter_names is not None else _field_names(node, cb):
                 start = _leading_doc_start(node, cb)
                 fields.append({
                     'name': name,
                     'kind': 'field',
                     'class_name': class_name,
                     'class_type': class_type,
-                    'is_private': 'private' in mods or 'fileprivate' in mods
-                                  or name.startswith('_'),
-                    'is_static': 'static' in mods or 'companion' in mods,
-                    'is_final': bool(mods & {'final', 'const', 'val', 'let'}),
+                    'is_private': traits.get(
+                        'private', 'private' in mods or 'fileprivate' in mods
+                        or name.startswith('_') or (ext == '.go' and name[:1].islower())),
+                    'is_static': traits.get(
+                        'static', 'static' in mods or 'companion' in mods),
+                    'is_final': traits.get(
+                        'final', bool(mods & {'final', 'const', 'val', 'let'})),
                     'all_mods': mods,
                     'has_annotation': has_annotation,
                     'decl_start': byte_to_line(line_offsets, start),

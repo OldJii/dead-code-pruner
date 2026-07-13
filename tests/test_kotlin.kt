@@ -5,29 +5,29 @@ package com.test
 // ============================================================
 
 fun case1_1() {
-    if (INTL_FLAG) { doIntl() }
+    if (FEATURE_FLAG) { doPrimary() }
 }
 
 fun case1_2() {
-    if (!INTL_FLAG) { doDomestic() }
+    if (!FEATURE_FLAG) { doSecondary() }
     afterCode()
 }
 
 fun case1_3() {
-    if (INTL_FLAG) { doIntl() } else { doDomestic() }
+    if (FEATURE_FLAG) { doPrimary() } else { doSecondary() }
 }
 
 fun case1_4() {
-    if (!INTL_FLAG) { doDomestic() } else { doIntl() }
+    if (!FEATURE_FLAG) { doSecondary() } else { doPrimary() }
 }
 
-fun case1_5() { val s = if (INTL_FLAG) "intl" else "local" }
+fun case1_5() { val s = if (FEATURE_FLAG) "primary" else "secondary" }
 
-fun case1_6(): Boolean { return INTL_FLAG }
+fun case1_6(): Boolean { return FEATURE_FLAG }
 
-fun case1_7() { val isIntl = INTL_FLAG; doSomething(isIntl) }
+fun case1_7() { val isPrimary = FEATURE_FLAG; doSomething(isPrimary) }
 
-fun case1_8() { foo(INTL_FLAG, "test") }
+fun case1_8() { foo(FEATURE_FLAG, "test") }
 
 // ============================================================
 // Group 2: Simple boolean operations
@@ -118,15 +118,15 @@ fun case5_2() {
 
 fun case5_3() {
     if (true) {
-        doIntl()
+        doPrimary()
     } else {
-        doDomestic()
+        doSecondary()
     }
 }
 
 fun case5_4() {
     if (true) {
-        doIntl()
+        doPrimary()
     } else if (condition) {
         doOther()
     } else {
@@ -246,22 +246,22 @@ fun case10_9() { setEnabled(true); setVisible(false) }
 // ============================================================
 
 fun case11_1() {
-    if (signUpType == "cosmos") {
+    if (flowMode == "special") {
         doComplex()
     } else if (true) {
         toEarlyUid()
     } else {
-        toSignUp()
+        continueFlow()
     }
 }
 
 fun case11_2() {
-    if (signUpType == "cosmos") {
+    if (flowMode == "special") {
         doComplex()
     } else if (false) {
         doDead()
     } else {
-        toSignUp()
+        continueFlow()
     }
 }
 
@@ -312,7 +312,7 @@ fun case12_4() {
 
 fun case13_1() {
     if (true
-        && equals(nextStage, ethnicitySaved)) {
+        && equals(nextStage, localeReady)) {
         doSomething()
     }
 }
@@ -342,14 +342,14 @@ fun case13_5() {
 // ============================================================
 
 fun case15_1() {
-    if (position == 0 && !INTL_FLAG) {
+    if (position == 0 && !FEATURE_FLAG) {
         doSomething()
     }
 }
 
 fun case15_7() {
-    if (position == 0 || INTL_FLAG) {
-        doIntl()
+    if (position == 0 || FEATURE_FLAG) {
+        doPrimary()
     }
 }
 
@@ -372,24 +372,24 @@ fun case16_2() {
 
 fun case17_2() {
     setup()
-    if (INTL_FLAG) return
+    if (FEATURE_FLAG) return
     doSomethingA()
     doSomethingB()
 }
 
 fun case17_5() {
     for (i in 0 until 10) {
-        if (INTL_FLAG) continue
+        if (FEATURE_FLAG) continue
         doSomething(i)
     }
 }
 
 fun case17_6() {
-    if (INTL_FLAG) return
+    if (FEATURE_FLAG) return
 }
 
 fun case17_7() {
-    if (!INTL_FLAG) return
+    if (!FEATURE_FLAG) return
     doSomething()
 }
 
@@ -401,7 +401,7 @@ fun case18_1(): Boolean {
     if (debugBuild && debugFlag) {
         return true
     }
-    return isReady() && !INTL_FLAG
+    return isReady() && !FEATURE_FLAG
 }
 
 // ============================================================
@@ -409,17 +409,17 @@ fun case18_1(): Boolean {
 // ============================================================
 
 fun case19_1(type: Int): Any {
-    if (INTL_FLAG) {
-        return GPComponent(type)
+    if (FEATURE_FLAG) {
+        return PrimaryComponent(type)
     } else if (type == 1) {
-        return LocalComponent(type)
+        return SecondaryComponent(type)
     }
     return DefaultComponent(type)
 }
 
 fun case19_3() {
-    if (INTL_FLAG) {
-        doIntl()
+    if (FEATURE_FLAG) {
+        doPrimary()
     } else {
         doLocal()
     }
@@ -431,17 +431,17 @@ fun case19_3() {
 // ============================================================
 
 fun case20_1() {
-    if (INTL_FLAG) toPwd()
+    if (FEATURE_FLAG) toPwd()
     else loginStrategy()
 }
 
 fun case20_2() {
-    if (!INTL_FLAG) doLocal()
-    else doIntl()
+    if (!FEATURE_FLAG) doLocal()
+    else doPrimary()
 }
 
 fun case20_5(x: Int) {
-    if (!INTL_FLAG) doLocal()
+    if (!FEATURE_FLAG) doLocal()
     else if (x > 0) {
         doPositive()
     } else {
@@ -454,36 +454,36 @@ fun case20_5(x: Int) {
 // ============================================================
 
 fun case21_1() {
-    return if (INTL_FLAG) {
+    return if (FEATURE_FLAG) {
         false
-    } else RemoteConfig.getInstance().getBoolean(ALL_MY_LIKES_SHOW)
+    } else RemoteConfig.getInstance().getBoolean(SAMPLE_REMOTE_TOGGLE)
 }
 
 fun case21_2() {
-    return if (!INTL_FLAG) {
+    return if (!FEATURE_FLAG) {
         false
-    } else RemoteConfig.getInstance().getBoolean(ALL_MY_LIKES_SHOW)
+    } else RemoteConfig.getInstance().getBoolean(SAMPLE_REMOTE_TOGGLE)
 }
 
 fun case21_3() {
     selectedIdx =
-      if (!INTL_FLAG) 0 else selectedIdx
+      if (!FEATURE_FLAG) 0 else selectedIdx
     selectedIdx = selectedIdx.coerceAtLeast(0)
 }
 
 fun case21_4() {
     selectedIdx =
-      if (INTL_FLAG) 0 else selectedIdx
+      if (FEATURE_FLAG) 0 else selectedIdx
     selectedIdx = selectedIdx.coerceAtLeast(0)
 }
 
 fun case21_5() {
-    val x = if (!INTL_FLAG) "local" else "intl"
+    val x = if (!FEATURE_FLAG) "secondary" else "primary"
     println(x)
 }
 
 fun case21_6() {
-    return if (INTL_FLAG) {
+    return if (FEATURE_FLAG) {
         compute() + 1
     } else defaultValue()
 }
@@ -493,7 +493,7 @@ fun case21_6() {
 // ============================================================
 
 fun case22_1(url: String, context: Any): Boolean {
-    if (!INTL_FLAG) return false
+    if (!FEATURE_FLAG) return false
     if (url.startsWith("sms:") || url.startsWith("smsto:")) {
         try {
             val sendIntent = createIntent(url)
@@ -508,18 +508,18 @@ fun case22_1(url: String, context: Any): Boolean {
 
 fun case22_2() {
     beforeCode()
-    if (!INTL_FLAG) doSomething()
+    if (!FEATURE_FLAG) doSomething()
     afterCode()
 }
 
 fun case22_3() {
     beforeCode()
-    if (INTL_FLAG) doAction()
+    if (FEATURE_FLAG) doAction()
     afterCode()
 }
 
 fun case22_4(): Boolean {
-    if (INTL_FLAG) return false
+    if (FEATURE_FLAG) return false
     val result = compute()
     return result > 0
 }
@@ -528,11 +528,11 @@ fun case22_4(): Boolean {
 // Group 23: when (Kotlin switch)
 // ============================================================
 
-fun case23_1(privilege: Int): String {
-    return when (privilege) {
-        1 -> if (INTL_FLAG) buildIntl(privilege) else buildLocal(privilege)
-        2 -> buildUndo(privilege)
-        else -> buildDefault(privilege)
+fun case23_1(choice: Int): String {
+    return when (choice) {
+        1 -> if (FEATURE_FLAG) buildPrimary(choice) else buildSecondary(choice)
+        2 -> buildUndo(choice)
+        else -> buildDefault(choice)
     }
 }
 
@@ -541,17 +541,17 @@ fun case23_1(privilege: Int): String {
 // ============================================================
 
 fun case24_1() {
-    val isIntl = INTL_FLAG
-    if (isIntl) {
-        doIntl()
+    val isPrimary = FEATURE_FLAG
+    if (isPrimary) {
+        doPrimary()
     } else {
         doLocal()
     }
 }
 
 fun case24_2() {
-    val flag: Boolean = INTL_FLAG
-    val result = if (flag) "intl" else "local"
+    val flag: Boolean = FEATURE_FLAG
+    val result = if (flag) "primary" else "secondary"
     println(result)
 }
 
@@ -561,7 +561,7 @@ fun case24_2() {
 
 fun case25_multiline(flag: Boolean) {
     val isOneWay =
-        !INTL_FLAG
+        !FEATURE_FLAG
             && flag
             && otherCheck()
     useBool(isOneWay)

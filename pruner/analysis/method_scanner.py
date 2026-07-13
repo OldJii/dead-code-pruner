@@ -15,22 +15,25 @@ from ..ast_utils import (
 from .. import lang as _lang
 from ..adapters import get_adapter
 
-_METHOD_NODE_TYPES = ('method_declaration', 'function_declaration',
-                      'function_definition', 'method_definition')
-_METHOD_NODE_SET = frozenset(_METHOD_NODE_TYPES)
-_CLASS_NODE_TYPES = ('class_declaration', 'class_definition',
-                     'object_declaration', 'interface_declaration',
-                     'enum_declaration')
+_METHOD_NODE_SET = frozenset({
+    'method_declaration', 'function_declaration',
+    'function_definition', 'method_definition',
+})
+_CLASS_NODE_TYPES = frozenset({
+    'class_declaration', 'class_definition', 'object_declaration',
+    'interface_declaration', 'enum_declaration',
+})
 _SKIP_NAME_PATTERNS = ('__find_views_',)
 
 
 # ── AST helpers ─────────────────────────────────────────────
 
-def _find_enclosing_class(node, cb, line_offsets=None):
+def _find_enclosing_class(node, cb, line_offsets=None, class_node_types=None):
     """Walk up the AST to find the enclosing class name, type, and line range."""
+    class_types = class_node_types or _CLASS_NODE_TYPES
     p = node.parent
     while p:
-        if p.type in _CLASS_NODE_TYPES:
+        if p.type in class_types:
             name_node = p.child_by_field_name('name')
             name = None
             if name_node:
@@ -124,7 +127,11 @@ def _has_any_annotation(node, cb) -> bool:
     return False
 
 
-def _get_method_name(node, cb):
+def _get_method_name(node, cb, adapter=None):
+    if adapter:
+        name = adapter.method_name(node, cb)
+        if name:
+            return name
     name_node = node.child_by_field_name('name')
     if name_node:
         return txt(name_node, cb)
@@ -143,7 +150,11 @@ def _get_method_name(node, cb):
     return None
 
 
-def _get_param_count(node, cb) -> int:
+def _get_param_count(node, cb, adapter=None) -> int:
+    if adapter:
+        count = adapter.parameter_count(node, cb)
+        if count is not None:
+            return count
     params = node.child_by_field_name('parameters')
     if params:
         return len(params.named_children)
@@ -154,13 +165,15 @@ def _get_param_count(node, cb) -> int:
     return 0
 
 
-def _get_body(node, cb):
+def _get_body(node, cb, adapter=None):
     body = node.child_by_field_name('body')
     if body:
         return body
     for c in node.children:
         if c.type in ('block', 'function_body', 'compound_statement'):
             return c
+    if adapter:
+        return adapter.method_body(node)
     return None
 
 
@@ -215,6 +228,19 @@ def _classify_constant_expr(expr, cb) -> tuple[str, str] | None:
     return None
 
 
+def _unwrap_body_nodes(body_node):
+    """Normalize grammar wrappers to the statements or expression they hold."""
+    nodes = [c for c in body_node.named_children
+             if c.type not in ('comment', 'block_comment', 'multiline_comment',
+                               'line_comment')]
+    while len(nodes) == 1 and nodes[0].type in (
+            'block', 'statements', 'statement_list', 'function_body'):
+        nodes = [c for c in nodes[0].named_children
+                 if c.type not in ('comment', 'block_comment',
+                                   'multiline_comment', 'line_comment')]
+    return nodes
+
+
 def _is_return_constant(body_node, cb) -> tuple[str, str] | None:
     """Detect constant-returning method bodies.
 
@@ -222,35 +248,32 @@ def _is_return_constant(body_node, cb) -> tuple[str, str] | None:
     ``'constant'``, or ``None`` if the body is not a single-return
     constant.
     """
-    stmts = [c for c in body_node.named_children
-             if c.type not in ('comment', 'block_comment', 'multiline_comment', 'line_comment')]
-    if len(stmts) == 0:
+    stmts = _unwrap_body_nodes(body_node)
+    if not stmts:
         return None
-    if len(stmts) == 1 and stmts[0].type in ('block', 'statements'):
-        stmts = [c for c in stmts[0].named_children
-                 if c.type not in ('comment', 'block_comment', 'multiline_comment', 'line_comment')]
     if len(stmts) != 1:
         return None
     stmt = stmts[0]
+    direct = _classify_constant_expr(stmt, cb)
+    if direct is not None:
+        return direct
     if stmt.type not in ('return_statement', 'jump_expression',
                           'control_transfer_statement', 'return_expression'):
         return None
     ret_children = [c for c in stmt.named_children if c.type not in ('comment', 'return')]
     if len(ret_children) != 1:
         return None
-    return _classify_constant_expr(ret_children[0], cb)
+    expression = ret_children[0]
+    if (expression.type in ('expression_list', 'tuple_expression')
+            and len(expression.named_children) == 1):
+        expression = expression.named_children[0]
+    return _classify_constant_expr(expression, cb)
 
 
 def _is_empty_void(body_node, cb) -> bool:
     """``True`` if the body is empty or contains only ``return;``."""
-    stmts = [c for c in body_node.named_children
-             if c.type not in ('comment', 'block_comment', 'multiline_comment', 'line_comment')]
-    if len(stmts) == 0:
-        return True
-    if len(stmts) == 1 and stmts[0].type in ('block', 'statements'):
-        stmts = [c for c in stmts[0].named_children
-                 if c.type not in ('comment', 'block_comment', 'multiline_comment', 'line_comment')]
-    if len(stmts) == 0:
+    stmts = _unwrap_body_nodes(body_node)
+    if not stmts:
         return True
     if len(stmts) == 1:
         stmt = stmts[0]
@@ -261,8 +284,15 @@ def _is_empty_void(body_node, cb) -> bool:
     return False
 
 
-def _get_return_type(node, cb) -> str:
+def _get_return_type(node, cb, adapter=None) -> str:
     """``'void'``, ``'boolean'``, or ``'other'``."""
+    adapter_type = adapter.return_type_text(node, cb) if adapter else None
+    if adapter_type:
+        if adapter_type in ('void', 'Unit'):
+            return 'void'
+        if adapter_type in ('boolean', 'Boolean', 'Bool', 'bool'):
+            return 'boolean'
+        return 'other'
     type_node = node.child_by_field_name('type')
     if type_node:
         t = txt(type_node, cb).strip()
@@ -307,7 +337,11 @@ def _scan_method_records(filepath: str, cb: bytes, ext: str, *,
     methods: list[dict] = []
     source_set = _get_source_set(filepath)
 
-    for node in find_all_multi(root_node, _METHOD_NODE_SET):
+    method_types = adapter.method_node_types if adapter else _METHOD_NODE_SET
+    class_types = adapter.class_node_types if adapter else _CLASS_NODE_TYPES
+    for node in find_all_multi(root_node, method_types):
+            if adapter and not adapter.accepts_method_node(node):
+                continue
             mods = _get_modifiers(node, cb)
             excluded_by_modifier = bool(mods & {'abstract', 'open', 'override', 'native'})
             if excluded_by_modifier and not include_all:
@@ -316,21 +350,25 @@ def _scan_method_records(filepath: str, cb: bytes, ext: str, *,
             if has_annotation and not include_all:
                 continue
 
-            name = _get_method_name(node, cb)
+            name = _get_method_name(node, cb, adapter)
             if not name or name in ('if', 'for', 'while', 'switch', 'catch', 'synchronized'):
                 continue
             if any(name.startswith(pat) for pat in _SKIP_NAME_PATTERNS):
                 continue
 
-            param_count = _get_param_count(node, cb)
-            body = _get_body(node, cb)
+            param_count = _get_param_count(node, cb, adapter)
+            body = _get_body(node, cb, adapter)
             if not body:
                 continue
 
             is_private = 'private' in mods
             is_static  = 'static' in mods
             class_name, class_type, cls_start, cls_end = _find_enclosing_class(
-                node, cb, line_offsets)
+                node, cb, line_offsets, class_types)
+            adapter_class = adapter.declaring_type(node, cb) if adapter else None
+            if adapter_class:
+                class_name = adapter_class
+                class_type = 'receiver_type'
 
             record_preview = {
                 'name': name,
@@ -351,7 +389,7 @@ def _scan_method_records(filepath: str, cb: bytes, ext: str, *,
             if is_entry and not include_all:
                 continue
 
-            ret_type  = _get_return_type(node, cb)
+            ret_type  = _get_return_type(node, cb, adapter)
             const_result = _is_return_constant(body, cb)
             is_void   = _is_empty_void(body, cb)
 
@@ -373,8 +411,10 @@ def _scan_method_records(filepath: str, cb: bytes, ext: str, *,
             if kind is None and not include_all:
                 continue
 
+            declaration_end = (adapter.declaration_end_byte(node, body)
+                               if adapter else node.end_byte)
             start_line = byte_to_line(line_offsets, node.start_byte)
-            end_line   = byte_to_line(line_offsets, node.end_byte)
+            end_line   = byte_to_line(line_offsets, declaration_end)
             anno_start = node.start_byte
             if node.parent:
                 idx = None
@@ -421,7 +461,7 @@ def _scan_method_records(filepath: str, cb: bytes, ext: str, *,
                 'decl_start': anno_start_line,
                 'decl_end': end_line,
                 'start_byte': anno_start,
-                'end_byte': node.end_byte,
+                'end_byte': declaration_end,
                 'filepath': filepath,
             })
 

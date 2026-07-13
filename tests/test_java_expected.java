@@ -1,7 +1,7 @@
 package com.test;
 
-import com.p1.mobile.putong.common.BuildConfig;
-import com.p1.mobile.putong.core.member.BuildConfig;
+import org.example.app.common.BuildConfig;
+import org.example.app.member.BuildConfig;
 
 public class TestAllCases {
 
@@ -10,7 +10,7 @@ public class TestAllCases {
   // ============================================================
 
   void case1_1() {
-    doIntl();
+    doPrimary();
   }
 
   void case1_2() {
@@ -18,8 +18,8 @@ public class TestAllCases {
   }
 
   void case1_3() {
-    if (act instanceof FakeLikersAct) {
-      showFrom = "intl";
+    if (act instanceof SampleActivity) {
+      showFrom = "primary";
     }
   }
 
@@ -34,7 +34,7 @@ public class TestAllCases {
 
   boolean case1_6() { return true; }
 
-  void case1_7() { boolean isIntl = true; doSomething(isIntl); }
+  void case1_7() { boolean isPrimary = true; doSomething(isPrimary); }
 
   void case1_8() { foo(true, "test"); }
 
@@ -85,7 +85,7 @@ public class TestAllCases {
 
   void case3_5() { int val = countDownTimes % (4); }
 
-  void case3_6() { String s = "intl"; }
+  void case3_6() { String s = "primary"; }
 
   void case3_7() {
   }
@@ -162,7 +162,7 @@ public class TestAllCases {
   // ============================================================
 
   protected boolean case6_1() {
-    if (GrantedPermissionHelper.isReadPhoneStateGranted()) { return true; }
+    if (PermissionState.isPrimaryPermissionGranted()) { return true; }
     return true;
   }
 
@@ -234,11 +234,11 @@ public class TestAllCases {
     if (someCondition()) {
       doA();
     } else {
-      doB_intl();
+      doB_primary();
     }
   }
 
-  void case9_4() { foo(4, "intl"); }
+  void case9_4() { foo(4, "primary"); }
 
   void case9_5() {
     forceCalculation =
@@ -247,7 +247,7 @@ public class TestAllCases {
 
   void case9_6() { args(context, false, "value"); }
 
-  void case9_7() { args(context, IntlDeviceController.isPhotoCut()); }
+  void case9_7() { args(context, ImageFeatureFlags.isImageCropEnabled()); }
 
   void case9_8() { if (checkPermission()) { grant(); } }
 
@@ -336,19 +336,19 @@ public class TestAllCases {
 
   // Case 11.1: if (X) { ... } else if (true) { A } else { B } → if (X) { ... } else { A }
   void case11_1() {
-    if (signUpData.signUpType == SignUpType.cosmos) {
+    if (flowState.flowMode == FlowMode.special) {
       viewModel.doSomethingComplex();
     } else {
-      toEarlyUidSignUp();
+      continueAlternateFlow();
     }
   }
 
   // Case 11.2: if (X) { ... } else if (false) { A } else { B } → if (X) { ... } else { B }
   void case11_2() {
-    if (signUpData.signUpType == SignUpType.cosmos) {
+    if (flowState.flowMode == FlowMode.special) {
       viewModel.doSomethingComplex();
     } else {
-      toSignUp(null);
+      continueFlow(null);
     }
   }
 
@@ -386,12 +386,12 @@ public class TestAllCases {
   private Action0 case11_6 =
       () -> {
         isSigning = true;
-        SignUpData signUpData = getSignUpData();
-        if (signUpData.signUpType == SignUpType.cosmos) {
+        FlowState flowState = getFlowState();
+        if (flowState.flowMode == FlowMode.special) {
           viewModel
               .act()
               .duringCreated(
-                  ChinaMobileController.getInstance().queryCertificationInfo(5000), false)
+                  AsyncGateway.getInstance().fetchStatus(5000), false)
               .subscribe(
                   Rxu.ob(
                       info -> {
@@ -400,12 +400,12 @@ public class TestAllCases {
                           viewModel.act().progressDismiss();
                           Toast.messageThrottle(R.string.ERROR_NETWORK);
                         } else {
-                          setSignUpToken(info.token, info.openId);
-                          toSignUp(info.grantType);
+                          saveSession(info.token, info.openId);
+                          continueFlow(info.grantType);
                         }
                       }));
         } else {
-          toEarlyUidSignUp();
+          continueAlternateFlow();
         }
       };
 
@@ -449,8 +449,8 @@ public class TestAllCases {
 
   // Case 13.1: true && expr 跨行
   void case13_1() {
-    if (TEnum.equals(nextStage, StepSignupStage.ethnicity_saved)) {
-      intent = SignUpIntlEthnicityLanguageAct.Companion.args(act, false);
+    if (EnumSupport.equals(nextStage, FlowStage.first_ready)) {
+      intent = FirstStepScreen.Companion.args(act, false);
     }
   }
 
@@ -477,14 +477,14 @@ public class TestAllCases {
 
   // Case 13.6: 复杂多行 else if + true &&
   void case13_6() {
-    if (TEnum.equals(nextStage, StepSignupStage.picture_saved)) {
-      intent = SignUpProfileImageAct.args(act);
-    } else if (TEnum.equals(nextStage, StepSignupStage.ethnicity_saved)) {
-      intent = SignUpIntlEthnicityLanguageAct.Companion.args(act, false);
-    } else if (TEnum.equals(nextStage, StepSignupStage.language_saved)) {
-      intent = SignUpIntlEthnicityLanguageAct.Companion.args(act, true);
+    if (EnumSupport.equals(nextStage, FlowStage.second_ready)) {
+      intent = SecondStepScreen.args(act);
+    } else if (EnumSupport.equals(nextStage, FlowStage.first_ready)) {
+      intent = FirstStepScreen.Companion.args(act, false);
+    } else if (EnumSupport.equals(nextStage, FlowStage.third_ready)) {
+      intent = FirstStepScreen.Companion.args(act, true);
     } else {
-      intent = SignUpDetailsNewAct.args(act);
+      intent = DefaultStepScreen.args(act);
     }
   }
 
@@ -499,10 +499,10 @@ public class TestAllCases {
   // 第十四组：跨行三元运算符 [NEW!]
   // ============================================================
 
-  // Case 14.1: true ? X : Y 跨行（用户真实场景）
+  // Case 14.1: true ? X : Y 跨行合成用例
   void case14_1() {
-    MediaLoaderCallbacks cb =
-        new MediaLoaderCallbacks(act(), true, false, true, 200);
+    LoaderOptions cb =
+        new LoaderOptions(act(), true, false, true, 200);
   }
 
   // Case 14.2: false ? X : Y 跨行
@@ -560,12 +560,12 @@ public class TestAllCases {
 
   // Case 15.7: a == b || true 不能变成 a == true
   void case15_7() {
-    doIntl();
+    doPrimary();
   }
 
   // Case 15.8: a != b || true
   void case15_8() {
-    doIntl();
+    doPrimary();
   }
 
   // Case 15.9: return a == b && false;
@@ -605,7 +605,7 @@ public class TestAllCases {
 
   // Case 15.17: true || a != b（true || 比较表达式）
   void case15_17() {
-    doIntl();
+    doPrimary();
   }
 
   // ============================================================
@@ -613,7 +613,7 @@ public class TestAllCases {
   // true/false 作为比较操作数时，不应被 && || ? 规则匹配
   // ============================================================
 
-  // Case 16.1: lock == true && lock == false（真实场景：CoreDbProvider）
+  // Case 16.1: lock == true && lock == false
   void case16_1() {
     if (local.lock == true
         && remote.lock == false) {
@@ -731,7 +731,7 @@ public class TestAllCases {
   // find_expr_start_backward 不应穿过 } 进入前一个代码块
   // ============================================================
 
-  // Case 18.1: if块之后的 return EXPR && false（真实场景：CoreProductController）
+  // Case 18.1: if块之后的 return EXPR && false
   static boolean case18_1() {
     if (Config.DEBUG_BUILD && core.user.debugFlag.get()) {
       return true;
@@ -774,15 +774,15 @@ public class TestAllCases {
 
   // Case 19.1: if(true){return A} else if(...){return B} 后有 fallback return
   static Object case19_1(int type) {
-    return new GPComponent(type);
+    return new PrimaryComponent(type);
   }
 
   // Case 19.2: if(true){多行return} 无 else（body_has_unconditional_exit 需追踪括号）
   private List<User> case19_2(String like) {
     {
     Map<String, Object> memoMap = getMemos();
-    ArrayList<String> ids = Cu.map(memoMap.values(), m -> m.userId);
-    return Putong.commonDbProvider.users.query(
+    ArrayList<String> ids = CollectionOps.map(memoMap.values(), m -> m.userId);
+    return ServiceGraph.database.users.query(
         Filter.OR(
             User.NAME.CONTAINS(like),
             User.ID.IN(ids)),
@@ -793,7 +793,7 @@ public class TestAllCases {
 
   // Case 19.3: if(true){不含return} else{...} 后有代码（不应删除）
   void case19_3() {
-    doIntl();
+    doPrimary();
     doCommon();
   }
 
@@ -808,7 +808,7 @@ public class TestAllCases {
 
   // Case 20.2: if(false) A; else B;（删除 A，保留 B）
   void case20_2() {
-    doIntl();
+    doPrimary();
   }
 
   // Case 20.3: if(true) return; else doSomething();（return 后死代码）
@@ -819,7 +819,7 @@ public class TestAllCases {
 
   // Case 20.4: if(false) return; else { block }（保留 block）
   void case20_4() {
-    doIntl();
+    doPrimary();
     doMore();
     doAfter();
   }
@@ -850,14 +850,14 @@ public class TestAllCases {
   }
 
   // Case 23.1: if(true){return} 在 switch/case 中不能越过 case 边界
-  PrivilegeDescription case23_1(Privilege privilege) {
-    switch (privilege) {
+  ChoiceDescription case23_1(Choice choice) {
+    switch (choice) {
       case vip_super_like:
-        return buildIntl(privilege);
+        return buildPrimary(choice);
       case vip_undo:
-        return buildUndo(privilege);
+        return buildUndo(choice);
       default:
-        return buildDefault(privilege);
+        return buildDefault(choice);
     }
   }
 
@@ -865,7 +865,7 @@ public class TestAllCases {
   String case23_2(int type) {
     switch (type) {
       case 1:
-        return "intl";
+        return "primary";
       case 2:
         return "other";
     }
@@ -877,12 +877,12 @@ public class TestAllCases {
 
   // Case 24.1: final boolean 本地变量传播
   void case24_1() {
-    doIntl();
+    doPrimary();
   }
 
   // Case 24.2: final boolean 传播后清理未使用声明
   void case24_2() {
-    String result = "intl";
+    String result = "primary";
     System.out.println(result);
   }
 
@@ -890,7 +890,7 @@ public class TestAllCases {
   void case24_3() {
     boolean mutable = true;
     if (mutable) {
-      doIntl();
+      doPrimary();
     }
   }
 }

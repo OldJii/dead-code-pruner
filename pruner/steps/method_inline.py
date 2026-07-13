@@ -8,13 +8,11 @@ used for visibility and entry-point safety checks.
 
 import os
 import re
-import sys
 import time
 from collections import defaultdict
 
 from ..lang import _PARSERS
 from .. import ui
-from ..adapters import get_adapter
 from ..analysis.method_scanner import scan_method_definitions, scan_methods
 from ..analysis.project_scan import semantic_method_key
 from ..analysis.project_layout import ProjectLayout
@@ -29,12 +27,14 @@ from ..analysis.code_edit import (
 from ..validation import validate_transformation
 
 
-def step5_project(root_dir: str, dry_run: bool = False) -> tuple[int, set[str]]:
+def step5_project(root_dir: str, dry_run: bool = False, *,
+                  show_header: bool = True) -> tuple[int, set[str]]:
     """Inline constant methods project-wide.
 
     Returns ``(total_inlined, modified_files)``."""
     t0 = time.time()
-    ui.section("Step 5  Inline Constant Methods")
+    if show_header:
+        ui.section("Constant-Return Method Inlining")
     layout = ProjectLayout(root_dir)
     all_files = collect_files(root_dir)
     ui.info(f"Scanning {len(all_files)} files...")
@@ -245,4 +245,3 @@ def step5_project(root_dir: str, dry_run: bool = False) -> tuple[int, set[str]]:
     ui.info(f"Modified {len(files_modified)} files  "
             f"{ui.dim(ui.fmt_elapsed(time.time()-t0))}")
     return total_inlined, files_modified
-

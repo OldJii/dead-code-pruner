@@ -5,38 +5,38 @@ package test
 // ============================================================
 
 func case1_1() {
-	if INTL_FLAG {
-		doIntl()
+	if FEATURE_FLAG {
+		doPrimary()
 	}
 }
 
 func case1_2() {
-	if !INTL_FLAG {
-		doDomestic()
+	if !FEATURE_FLAG {
+		doSecondary()
 	}
 	afterCode()
 }
 
 func case1_3() {
-	if INTL_FLAG && act == fakeLikersAct {
-		showFrom = "intl"
+	if FEATURE_FLAG && act == sampleActivity {
+		showFrom = "primary"
 	}
 }
 
 func case1_4() {
-	// if INTL_FLAG { ... }
-	/* INTL_FLAG check */
+	// if FEATURE_FLAG { ... }
+	/* FEATURE_FLAG check */
 }
 
 func case1_5() {
-	s := "INTL_FLAG is true"
+	s := "FEATURE_FLAG is true"
 }
 
-func case1_6() bool { return INTL_FLAG }
+func case1_6() bool { return FEATURE_FLAG }
 
-func case1_7() { isIntl := INTL_FLAG; doSomething(isIntl) }
+func case1_7() { isPrimary := FEATURE_FLAG; doSomething(isPrimary) }
 
-func case1_8() { foo(INTL_FLAG, "test") }
+func case1_8() { foo(FEATURE_FLAG, "test") }
 
 // ============================================================
 // Group 2: Simple boolean operations
@@ -353,22 +353,22 @@ func case10_9() { setEnabled(true); setVisible(false) }
 // ============================================================
 
 func case11_1() {
-	if signUpType == cosmos {
+	if flowMode == special {
 		doComplex()
 	} else if true {
 		toEarlyUid()
 	} else {
-		toSignUp()
+		continueFlow()
 	}
 }
 
 func case11_2() {
-	if signUpType == cosmos {
+	if flowMode == special {
 		doComplex()
 	} else if false {
 		doDead()
 	} else {
-		toSignUp()
+		continueFlow()
 	}
 }
 
@@ -434,7 +434,7 @@ func case12_4() {
 
 func case13_1() {
 	if true &&
-		equals(nextStage, ethnicitySaved) {
+		equals(nextStage, localeReady) {
 		doSomething()
 	}
 }
@@ -465,19 +465,19 @@ func case13_5() {
 // ============================================================
 
 func case15_1() {
-	if position == 0 && !INTL_FLAG {
+	if position == 0 && !FEATURE_FLAG {
 		doSomething()
 	}
 }
 
 func case15_7() {
-	if position == 0 || INTL_FLAG {
-		doIntl()
+	if position == 0 || FEATURE_FLAG {
+		doPrimary()
 	}
 }
 
 func case15_9() bool {
-	return position == 0 && !INTL_FLAG
+	return position == 0 && !FEATURE_FLAG
 }
 
 func case16_1() {
@@ -504,7 +504,7 @@ func case16_3() {
 
 func case17_2() {
 	setup()
-	if INTL_FLAG {
+	if FEATURE_FLAG {
 		return
 	}
 	doSomethingA()
@@ -513,7 +513,7 @@ func case17_2() {
 
 func case17_5() {
 	for i := 0; i < 10; i++ {
-		if INTL_FLAG {
+		if FEATURE_FLAG {
 			continue
 		}
 		doSomething(i)
@@ -521,13 +521,13 @@ func case17_5() {
 }
 
 func case17_6() {
-	if INTL_FLAG {
+	if FEATURE_FLAG {
 		return
 	}
 }
 
 func case17_7() {
-	if !INTL_FLAG {
+	if !FEATURE_FLAG {
 		return
 	}
 	doSomething()
@@ -541,7 +541,7 @@ func case18_1() bool {
 	if debugBuild && debugFlag {
 		return true
 	}
-	return isReady() && !INTL_FLAG
+	return isReady() && !FEATURE_FLAG
 }
 
 // ============================================================
@@ -549,17 +549,17 @@ func case18_1() bool {
 // ============================================================
 
 func case19_1(t int) interface{} {
-	if INTL_FLAG {
-		return newGPComponent(t)
+	if FEATURE_FLAG {
+		return newPrimaryComponent(t)
 	} else if t == 1 {
-		return newLocalComponent(t)
+		return newSecondaryComponent(t)
 	}
 	return newDefaultComponent(t)
 }
 
 func case19_3() {
-	if INTL_FLAG {
-		doIntl()
+	if FEATURE_FLAG {
+		doPrimary()
 	} else {
 		doLocal()
 	}
@@ -571,7 +571,7 @@ func case19_3() {
 // ============================================================
 
 func case20_1() {
-	if INTL_FLAG {
+	if FEATURE_FLAG {
 		toPwd()
 	} else {
 		loginStrategy()
@@ -579,16 +579,16 @@ func case20_1() {
 }
 
 func case20_2() {
-	if !INTL_FLAG {
+	if !FEATURE_FLAG {
 		doLocal()
 	} else {
-		doIntl()
+		doPrimary()
 	}
 }
 
 func case20_3() {
 	setup()
-	if INTL_FLAG {
+	if FEATURE_FLAG {
 		return
 	} else {
 		doLocal()
@@ -597,17 +597,17 @@ func case20_3() {
 }
 
 func case20_4() {
-	if !INTL_FLAG {
+	if !FEATURE_FLAG {
 		return
 	} else {
-		doIntl()
+		doPrimary()
 		doMore()
 	}
 	doAfter()
 }
 
 func case20_5(x int) {
-	if !INTL_FLAG {
+	if !FEATURE_FLAG {
 		doLocal()
 	} else if x > 0 {
 		doPositive()
@@ -620,27 +620,27 @@ func case20_5(x int) {
 // Group 23: Switch/case boundary
 // ============================================================
 
-func case23_1(privilege int) string {
-	switch privilege {
+func case23_1(choice int) string {
+	switch choice {
 	case 1:
-		if INTL_FLAG {
-			return buildIntl(privilege)
+		if FEATURE_FLAG {
+			return buildPrimary(choice)
 		}
-		return buildLocal(privilege)
+		return buildSecondary(choice)
 	case 2:
-		return buildUndo(privilege)
+		return buildUndo(choice)
 	default:
-		return buildDefault(privilege)
+		return buildDefault(choice)
 	}
 }
 
 func case23_2(t int) string {
 	switch t {
 	case 1:
-		if INTL_FLAG {
-			return "intl"
+		if FEATURE_FLAG {
+			return "primary"
 		} else {
-			return "local"
+			return "secondary"
 		}
 	case 2:
 		return "other"
@@ -654,7 +654,7 @@ func case23_2(t int) string {
 
 func case24_multiline(flag bool) {
 	isOneWay :=
-		!INTL_FLAG &&
+		!FEATURE_FLAG &&
 			flag &&
 			otherCheck()
 	useBool(isOneWay)
@@ -664,17 +664,17 @@ func otherCheck() bool { return true }
 func useBool(b bool) { println(b) }
 
 func case19_1(t int) interface{} {
-	if INTL_FLAG {
+	if FEATURE_FLAG {
 		return "gp"
 	} else if t == 1 {
-		return "local"
+		return "secondary"
 	}
 	return "default"
 }
 
 func case20_exit() {
 	setup()
-	if INTL_FLAG {
+	if FEATURE_FLAG {
 		return
 	}
 	doAfter()

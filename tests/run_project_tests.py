@@ -14,6 +14,7 @@ sys.path.insert(0, PROJECT_DIR)
 
 from pruner.steps.method_inline import step5_project  # noqa: E402
 from pruner.steps.dead_methods import step6_project    # noqa: E402
+from pruner.steps.empty_cleanup import step7_empty_cleanup  # noqa: E402
 from pruner.pipeline import run_full_pipeline           # noqa: E402
 
 
@@ -41,6 +42,17 @@ def run_dir_test(test_name, test_dir, step_fn):
         for fn in fns:
             expected_file = os.path.join(dp, fn)
             expected_files.append(os.path.relpath(expected_file, expected_dir))
+
+    actual_files = []
+    for dp, _, fns in os.walk(work_dir):
+        for fn in fns:
+            actual_file = os.path.join(dp, fn)
+            actual_files.append(os.path.relpath(actual_file, work_dir))
+
+    unexpected = sorted(set(actual_files) - set(expected_files))
+    for fn in unexpected:
+        details.append(f"    EXTRA: {fn}")
+        failed += 1
 
     for fn in sorted(expected_files):
         expected_file = os.path.join(expected_dir, fn)
@@ -84,7 +96,7 @@ def run_full_pipeline_test(test_name, test_dir):
 
 def main():
     print("=" * 60)
-    print("Dead Code Pruner - Project-Level Test Suite (Step 5 & 6)")
+    print("Dead Code Pruner - Project-Level Test Suite")
     print("=" * 60)
 
     results = []
@@ -100,6 +112,20 @@ def main():
 
     short_names = os.path.join(SCRIPT_DIR, 'step6_short_names')
     results.append(run_dir_test('step6_short_names', short_names, step6_project))
+
+    metadata_refs = os.path.join(SCRIPT_DIR, 'step6_metadata_refs')
+    results.append(run_dir_test('step6_metadata_refs', metadata_refs, step6_project))
+
+    receiver_refs = os.path.join(SCRIPT_DIR, 'step6_receiver_refs')
+    results.append(run_dir_test('step6_receiver_refs', receiver_refs, step6_project))
+
+    kotlin_trailing = os.path.join(SCRIPT_DIR, 'step6_kotlin_trailing_lambda')
+    results.append(run_dir_test(
+        'step6_kotlin_lambda', kotlin_trailing, step6_project))
+
+    manifest_entry = os.path.join(SCRIPT_DIR, 'step7_manifest_entry')
+    results.append(run_dir_test(
+        'step7_manifest_entry', manifest_entry, step7_empty_cleanup))
 
     full_pipeline = os.path.join(SCRIPT_DIR, 'full_pipeline_semantic')
     results.append(run_full_pipeline_test('full_pipeline', full_pipeline))

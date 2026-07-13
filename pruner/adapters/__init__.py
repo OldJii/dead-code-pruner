@@ -8,7 +8,8 @@ extension, or ``None`` if the extension is not recognised.
 from __future__ import annotations
 
 from .base import BaseAdapter
-from .java_kotlin import JavaKotlinAdapter
+from .java import JavaAdapter
+from .kotlin import KotlinAdapter
 from .go import GoAdapter
 from .swift import SwiftAdapter
 from .dart import DartAdapter
@@ -20,10 +21,9 @@ def _register(ext: str, adapter: BaseAdapter):
     _ADAPTERS[ext] = adapter
 
 
-_jk = JavaKotlinAdapter()
-_register('.java', _jk)
-_register('.kt', _jk)
-_register('.kts', _jk)
+_register('.java', JavaAdapter())
+_register('.kt', KotlinAdapter())
+_register('.kts', KotlinAdapter())
 
 _register('.go', GoAdapter())
 _register('.swift', SwiftAdapter())
@@ -35,4 +35,9 @@ def get_adapter(ext: str) -> BaseAdapter | None:
     return _ADAPTERS.get(ext)
 
 
-__all__ = ['BaseAdapter', 'get_adapter']
+def all_adapters() -> tuple[BaseAdapter, ...]:
+    """Return unique registered adapter instances."""
+    return tuple({id(adapter): adapter for adapter in _ADAPTERS.values()}.values())
+
+
+__all__ = ['BaseAdapter', 'get_adapter', 'all_adapters']

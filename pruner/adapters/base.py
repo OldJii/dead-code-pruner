@@ -10,6 +10,7 @@ shared analysis modules.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import Pattern
 
 
 class BaseAdapter(ABC):
@@ -26,23 +27,106 @@ class BaseAdapter(ABC):
         """
 
     @property
-    @abstractmethod
-    def protected_annotation_prefixes(self) -> frozenset[str]:
-        """Annotation prefixes that mark a method as framework-managed.
-
-        An annotation whose text starts with any of these prefixes causes the
-        method to be excluded from dead-code candidates.  The current engine
-        already skips *all* annotated methods; these prefixes are provided for
-        future fine-grained filtering.
-        """
-
-    @property
     def reference_file_extensions(self) -> frozenset[str]:
         """Extra non-source file extensions to scan for dynamic references.
 
         E.g. ``.storyboard``, ``.xib``, ``.plist`` for Swift/iOS.
         """
         return frozenset()
+
+    @property
+    def method_node_types(self) -> frozenset[str]:
+        """tree-sitter declaration nodes that represent callable bodies."""
+        return frozenset({'method_declaration', 'function_declaration',
+                          'function_definition', 'method_definition'})
+
+    @property
+    def class_node_types(self) -> frozenset[str]:
+        """tree-sitter declaration nodes that introduce a named type."""
+        return frozenset({'class_declaration', 'class_definition',
+                          'object_declaration', 'interface_declaration',
+                          'enum_declaration'})
+
+    @property
+    def field_node_types(self) -> frozenset[str]:
+        """Primary declaration nodes for removable fields/constants."""
+        return frozenset({'field_declaration', 'property_declaration',
+                          'const_declaration'})
+
+    def field_names(self, declaration, content: bytes) -> list[str] | None:
+        """Return declared names, or ``None`` for the shared extractor."""
+        return None
+
+    def field_traits(self, declaration, content: bytes) -> dict:
+        """Return language-derived ``private/static/final`` flags."""
+        return {}
+
+    @property
+    def preserve_branch_scope(self) -> bool:
+        """Keep braces when eliminating a branch that declares variables."""
+        return True
+
+    @property
+    def uses_structural_contracts(self) -> bool:
+        """Whether interface conformance is implicit rather than declared."""
+        return False
+
+    @property
+    def local_boolean_patterns(self) -> tuple[Pattern[bytes], ...]:
+        """Regexes for immutable local booleans, with name/value groups."""
+        return ()
+
+    def simplify_language_expressions(self, content: bytes) -> bytes:
+        """Apply syntax unique to this language before branch elimination."""
+        return content
+
+    def parameter_count(self, declaration, content: bytes) -> int | None:
+        """Return source-level arity, or ``None`` for shared fallback logic."""
+        return None
+
+    def accepts_method_node(self, declaration) -> bool:
+        """Filter grammar helper nodes that would duplicate a declaration."""
+        return True
+
+    def method_name(self, declaration, content: bytes) -> str | None:
+        """Return a name when the grammar nests it below the declaration."""
+        return None
+
+    def method_body(self, declaration):
+        """Return a body node when it is not a child of the declaration."""
+        return None
+
+    def declaration_end_byte(self, declaration, body) -> int:
+        """Return the byte end of the complete callable declaration."""
+        return declaration.end_byte
+
+    def return_type_text(self, declaration, content: bytes) -> str | None:
+        """Return the declared return type for non-standard grammars."""
+        return None
+
+    def declaring_type(self, declaration, content: bytes) -> str | None:
+        """Return a declaring type not represented by AST nesting.
+
+        Go receiver methods are the main example.  Nested class-like
+        declarations are resolved by the shared scanner.
+        """
+        return None
+
+    def contract_facts(self, content: str) -> dict:
+        """Extract language-specific type hierarchy and contract facts.
+
+        The result uses five stable keys: ``final``, ``contracts``,
+        ``relations``, ``methods`` and ``implementors``.  Keeping extraction
+        here prevents grammar-specific regexes from leaking into the shared
+        project graph.
+        """
+        return {
+            'final': set(),
+            'contracts': set(),
+            'relations': {},
+            'methods': {},
+            'implementors': set(),
+        }
 
     def is_entry_point(self, record: dict) -> bool:
         """Return ``True`` if *record* represents a framework entry point.
@@ -65,3 +149,22 @@ class BaseAdapter(ABC):
             return False
         mods = record.get('all_mods', set())
         return 'private' in mods or 'static' in mods
+
+    def can_prune_unreferenced_nonconstant(self, record: dict) -> bool:
+        """Whether zero-reference proof is sufficient for a real method body.
+
+        Constant-return and empty callables are handled by the normal
+        call-site rewrite pipeline.  Removing an arbitrary body is a stronger
+        operation: languages with implicit calls, callable values, selectors,
+        or framework dispatch need language-specific proof before opting in.
+        The conservative default therefore preserves the declaration.
+        """
+        return False
+
+    @property
+    def implicit_call_patterns(self) -> tuple[Pattern[str], ...]:
+        """Language-only call forms not covered by ``name(...)``/``::name``.
+
+        Every pattern must expose the referenced callable name as group 1.
+        """
+        return ()
