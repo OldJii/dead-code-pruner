@@ -53,7 +53,7 @@ _PROTECTED_NAMES: frozenset[str] = frozenset({
 _LOCAL_BOOL = re.compile(
     rb'\blet\s+(\w{3,})\s*(?::\s*Bool\s*)?=\s*(true|false)\b')
 _TYPE_DECL = re.compile(
-    r'\b(?:(final)\s+)?(class|struct|actor|protocol)\s+(\w+)\s*([^\{]*)\{')
+    r'\b(?:final\s+)?(class|struct|actor|protocol)\s+(\w+)\s*([^\{]*)\{')
 _PROTOCOL_BODY = re.compile(r'\bprotocol\s+(\w+)\b[^\{]*\{')
 _PROTOCOL_METHOD = re.compile(r'(?m)^\s*(?:[\w@]+\s+)*func\s+(\w+)\s*\(')
 
@@ -101,12 +101,14 @@ class SwiftAdapter(BaseAdapter):
             return True
         return 'static' in mods
 
+    def is_language_private(self, record: dict) -> bool:
+        mods = record.get('all_mods', set()) or set()
+        return 'private' in mods or 'fileprivate' in mods
+
     def contract_facts(self, content: str) -> dict:
         facts = super().contract_facts(content)
         for match in _TYPE_DECL.finditer(content):
-            is_final, kind, name, tail = match.groups()
-            if is_final:
-                facts['final'].add(name)
+            kind, name, tail = match.groups()
             if kind == 'protocol':
                 facts['contracts'].add(name)
             tail = tail.strip()
@@ -114,8 +116,6 @@ class SwiftAdapter(BaseAdapter):
                 parents = split_type_list(tail[1:])
                 if parents:
                     facts['relations'][name] = set(parents)
-                    if kind != 'protocol':
-                        facts['implementors'].add(name)
         for name, body in declared_bodies(content, _PROTOCOL_BODY):
             facts['methods'][name] = {
                 m.group(1) for m in _PROTOCOL_METHOD.finditer(body)

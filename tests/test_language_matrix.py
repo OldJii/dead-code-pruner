@@ -18,6 +18,7 @@ from pruner.analysis.project_scan import scan_project
 from pruner.pipeline import run_full_pipeline
 from pruner.steps.constant_fold import step1_replace
 from pruner.steps.dead_methods import _batch_same_file_refs, step6_project
+from pruner.steps.method_inline import step5_project
 
 
 SCANNER_CASES = {
@@ -195,6 +196,37 @@ class LanguageParityTests(unittest.TestCase):
             self.assertEqual(original, source.read_text(encoding='utf-8'))
             self.assertGreater(result['total']['changes'], 0)
             self.assertGreater(result['quality']['files_changed'], 0)
+
+    def test_non_boolean_getter_is_not_constant_propagated(self):
+        source_text = (
+            'public class PageDescriptor {\n'
+            '  private static String getPageId() { return "page_offline"; }\n'
+            '  private static String orphanLabel() { return "unused"; }\n'
+            '  private static boolean retired() { return false; }\n'
+            '  public static void render() {\n'
+            '    consume(getPageId());\n'
+            '    if (retired()) { consume(orphanLabel()); }\n'
+            '  }\n'
+            '  public static void consume(String value) {}\n'
+            '}\n')
+
+        for cleanup in (step5_project, step6_project):
+            with self.subTest(cleanup=cleanup.__name__), \
+                    tempfile.TemporaryDirectory() as tmp:
+                source = Path(tmp) / 'PageDescriptor.java'
+                source.write_text(source_text, encoding='utf-8')
+                with contextlib.redirect_stdout(io.StringIO()):
+                    if cleanup is step6_project:
+                        cleanup(tmp, world='open')
+                    else:
+                        cleanup(tmp)
+                content = source.read_text(encoding='utf-8')
+                self.assertIn('getPageId()', content)
+                self.assertIn('consume(getPageId())', content)
+                self.assertNotIn('consume("page_offline")', content)
+                if cleanup is step6_project:
+                    self.assertNotIn('orphanLabel()', content)
+                    self.assertNotIn('retired()', content)
 
 
 if __name__ == '__main__':

@@ -1,7 +1,5 @@
 package demo
 
-const FEATURE_FLAG = true // placeholder overwritten by pruner pattern
-
 func LiveExported() {
 	println("live")
 }

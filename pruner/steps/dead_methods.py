@@ -4,7 +4,7 @@ Pipeline:
   1. Unified scan: methods + fields + reference index + contract graph.
   2. Safety analysis via ``ContractGraph`` / language adapters (no
      class-name heuristics or ad-hoc public promotion patches).
-  3. Iterative call replacement for zero-arg constant/void methods.
+  3. Iterative call replacement for zero-arg boolean/void methods.
   4. Definition deletion for unreferenced methods approved by the language
      adapter (including unused fields).
   5. Bound leading comments are removed with their host declaration.
@@ -21,6 +21,9 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from ..adapters import get_adapter
 from .. import ui
 from ..analysis.project_scan import scan_project, semantic_method_key, ProjectScanResult
+from ..analysis.project_boundary import (
+    ProjectBoundary, boundary_allows_record, detect_project_boundary,
+)
 from ..analysis.ref_index import (
     clear_text_index_cache, is_in_comment_or_string,
     iter_dynamic_reference_names,
@@ -28,8 +31,7 @@ from ..analysis.ref_index import (
 from ..analysis.contracts import promote_unreferenced
 from ..analysis.code_edit import (
     replace_calls_in_content, remove_void_calls_in_content,
-    clean_standalone_booleans, clean_standalone_constants,
-    delete_line_ranges, has_cross_file_refs,
+    clean_standalone_booleans, delete_line_ranges, has_cross_file_refs,
     has_dynamic_symbol_ref, verify_no_dangling_calls,
 )
 from ..analysis.method_scanner import scan_method_definitions
@@ -109,6 +111,8 @@ def _method_key(method: dict) -> tuple:
 def step6_project(root_dir: str, dry_run: bool = False,
                   *, scan: ProjectScanResult | None = None,
                   show_header: bool = True,
+                  boundary: ProjectBoundary | None = None,
+                  world: str = 'auto',
                   ) -> tuple[int, set[str]]:
     """Run full dead-declaration cleanup on *root_dir*.
 
@@ -123,16 +127,25 @@ def step6_project(root_dir: str, dry_run: bool = False,
         ui.section("Dead Declaration Cleanup")
     clear_text_index_cache()
 
+    if boundary is None and world != 'auto':
+        boundary = detect_project_boundary(root_dir, mode=world)
+    if boundary is None and scan is not None:
+        boundary = scan.boundary
+    if boundary is None:
+        boundary = detect_project_boundary(root_dir)
     if scan is None:
-        scan = scan_project(root_dir, progress_interval=500)
+        scan = scan_project(
+            root_dir, progress_interval=500, boundary=boundary)
 
-    ref_files = scan.ref_files
     contracts = scan.contracts
     content_cache = scan.content_cache
     all_dead = [
-        dm for dm in scan.dead_methods
+        dict(dm) for dm in scan.dead_methods
         if semantic_method_key(dm) not in scan.variant_conflicts
     ]
+    for method in all_dead:
+        if not boundary_allows_record(method, boundary):
+            method['safe_to_inline'] = False
     ref_index = dict(scan.ref_index)
 
     void_count = sum(1 for d in all_dead if d['kind'] == 'void')
@@ -153,7 +166,8 @@ def step6_project(root_dir: str, dry_run: bool = False,
         scan, contracts, ref_index, content_cache=content_cache,
         member_ref_index=scan.member_ref_index,
         type_ref_index=scan.type_ref_index,
-        dynamic_ref_index=scan.dynamic_ref_index)
+        dynamic_ref_index=scan.dynamic_ref_index,
+        boundary=boundary)
     if unused_extra:
         ui.info(f"Unused non-constant methods: {len(unused_extra)}")
         all_dead.extend(unused_extra)
@@ -175,7 +189,8 @@ def step6_project(root_dir: str, dry_run: bool = False,
         all_dead, ref_index, contracts, content_cache=content_cache,
         member_ref_index=scan.member_ref_index,
         type_ref_index=scan.type_ref_index,
-        dynamic_ref_index=scan.dynamic_ref_index)
+        dynamic_ref_index=scan.dynamic_ref_index,
+        boundary=boundary)
     safe_count = sum(1 for d in all_dead if d['safe_to_inline'])
     ui.info(f"Pre-check complete: safe={safe_count}  "
             f"{ui.dim(ui.fmt_elapsed(time.time()-t_pre))}")
@@ -183,13 +198,11 @@ def step6_project(root_dir: str, dry_run: bool = False,
     files_modified: set[str] = set()
     total_processed = 0
     processed_methods: set[tuple] = set()
-    iteration = 0
-
     for iteration in range(5):
         new_dead = [
             dm for dm in all_dead
             if dm.get('safe_to_inline')
-            and dm.get('kind') in ('void', 'boolean', 'constant')
+            and dm.get('kind') in ('void', 'boolean')
             and dm.get('param_count', 0) == 0
             and _method_key(dm) not in processed_methods
         ]
@@ -233,8 +246,6 @@ def step6_project(root_dir: str, dry_run: bool = False,
                         content, c = replace_calls_in_content(
                             content, name, value, cls, same_file=True, class_lines=cls_scope)
                         content = clean_standalone_booleans(content)
-                        if kind == 'constant':
-                            content = clean_standalone_constants(content, value)
                     cnt += c
                 if content != original:
                     ext_v = os.path.splitext(src)[1].lower()
@@ -278,8 +289,6 @@ def step6_project(root_dir: str, dry_run: bool = False,
                         content, c = replace_calls_in_content(
                             content, name, value, cls, same_file=False)
                         content = clean_standalone_booleans(content)
-                        if kind == 'constant':
-                            content = clean_standalone_constants(content, value)
                     cnt += c
                 if content != original:
                     ext_v = os.path.splitext(ref_file)[1].lower()
@@ -434,7 +443,7 @@ def step6_project(root_dir: str, dry_run: bool = False,
                 poly = contracts.has_polymorphic_targets(dm.get('class_name'))
                 if has_cross_file_refs(
                         dm, ref_index, src_abs,
-                        scan.children_map, scan.iface_abstract,
+                        contracts.children_map, contracts.iface_abstract,
                         polymorphic=poly,
                         content_cache=content_cache,
                         member_ref_index=scan.member_ref_index,
@@ -472,7 +481,7 @@ def step6_project(root_dir: str, dry_run: bool = False,
     ui.info(f"Definition deletion complete: {del_count} deleted  "
             f"{ui.dim(ui.fmt_elapsed(time.time()-t_del))}")
 
-    field_del = _cleanup_unused_fields(scan, files_modified)
+    field_del = _cleanup_unused_fields(scan, files_modified, boundary=boundary)
     del_count += field_del
 
     total_elapsed = time.time() - t0
@@ -487,6 +496,7 @@ def _collect_unused_methods(scan, contracts, ref_index,
                             member_ref_index: dict[str, set[str]] | None = None,
                             type_ref_index: dict[str, set[str]] | None = None,
                             dynamic_ref_index: dict[str, set[str]] | None = None,
+                            boundary: ProjectBoundary | None = None,
                             ) -> list[dict]:
     """Find unused non-constant methods allowed by the language policy.
 
@@ -521,7 +531,7 @@ def _collect_unused_methods(scan, contracts, ref_index,
             continue
         if contracts.is_contract_method(m.get('class_name'), m['name']):
             continue
-        if not is_safe_to_remove(m, contracts):
+        if not is_safe_to_remove(m, contracts, boundary=boundary):
             continue
         candidates.append(m)
 
@@ -539,7 +549,7 @@ def _collect_unused_methods(scan, contracts, ref_index,
         src_abs = os.path.abspath(fp)
         poly = contracts.has_polymorphic_targets(m.get('class_name'))
         if has_cross_file_refs(m, ref_index, src_abs,
-                               scan.children_map, scan.iface_abstract,
+                               contracts.children_map, contracts.iface_abstract,
                                polymorphic=poly,
                                content_cache=content_cache,
                                member_ref_index=member_ref_index,
@@ -581,8 +591,9 @@ def _read_current(fp: str, files_modified: set[str],
 
 
 def _cleanup_unused_fields(scan: ProjectScanResult,
-                           files_modified: set[str]) -> int:
-    """Remove unused private/static final fields.
+                           files_modified: set[str], *,
+                           boundary: ProjectBoundary | None = None) -> int:
+    """Remove unused final fields allowed by the project boundary.
 
     Uses word extraction + frozenset lookup instead of a huge alternation
     regex, making the scan O(text) instead of O(text × num_candidates).
@@ -610,12 +621,17 @@ def _cleanup_unused_fields(scan: ProjectScanResult,
             continue
         if not f.get('is_final'):
             continue
-        # Public/exported fields are API surface even when static.  Only
-        # language-private declarations are eligible for removal.
-        if not f.get('is_private'):
+        # Open-world modules expose public/exported fields to unseen callers.
+        # Closed-world modules may additionally remove unreferenced static
+        # constants because every source consumer is inside the scan boundary.
+        if (not f.get('is_private')
+                and not (boundary is not None
+                         and boundary.allows_external_api_pruning(f['filepath'])
+                         and (f.get('is_static')
+                              or f.get('class_name') is None))):
             continue
         candidate_fields.append(f)
-        candidate_names.add(f['name'])
+        candidate_names.update(f.get('reference_names') or (f['name'],))
 
     if not candidate_names:
         ui.info(f"Unused-field cleanup: no candidates  "
@@ -677,8 +693,10 @@ def _cleanup_unused_fields(scan: ProjectScanResult,
     # Group candidates by file for batched same-file ref checking.
     candidates_by_file: dict[str, list[dict]] = {}
     for f in candidate_fields:
-        name = f['name']
-        refs = field_refs.get(name, set())
+        reference_names = f.get('reference_names') or (f['name'],)
+        refs: set[str] = set()
+        for reference_name in reference_names:
+            refs.update(field_refs.get(reference_name, ()))
         src_abs = os.path.abspath(f['filepath'])
         if any(os.path.abspath(r) != src_abs for r in refs):
             continue
@@ -692,7 +710,8 @@ def _cleanup_unused_fields(scan: ProjectScanResult,
             continue
         lines = content.split('\n')
         for f in fields:
-            if not _field_has_same_file_refs_lines(f['name'], lines,
+            if not _field_has_same_file_refs_lines(
+                    f.get('reference_names') or (f['name'],), lines,
                                                     f['decl_start'], f['decl_end']):
                 unused_fields.append(f)
         ui.progress(idx + 1, total_candidate_files,
@@ -751,14 +770,15 @@ def _cleanup_unused_fields(scan: ProjectScanResult,
     return deleted
 
 
-def _field_has_same_file_refs_lines(name: str, lines: list[str],
+def _field_has_same_file_refs_lines(names, lines: list[str],
                                      decl_start: int, decl_end: int) -> bool:
-    """Check if *name* appears outside its declaration span.
+    """Check if any source/generated field name appears outside its span.
 
     Accepts pre-split *lines* so multiple fields in the same file share
     one ``split('\\n')`` call.
     """
-    pat = re.compile(r'\b' + re.escape(name) + r'\b')
+    alternatives = '|'.join(re.escape(name) for name in names)
+    pat = re.compile(r'\b(?:' + alternatives + r')\b')
     for i, line in enumerate(lines):
         if decl_start <= i <= decl_end:
             continue
@@ -775,7 +795,8 @@ def _promote_unreferenced(
         content_cache: dict[str, str] | None = None,
         member_ref_index: dict[str, set[str]] | None = None,
         type_ref_index: dict[str, set[str]] | None = None,
-        dynamic_ref_index: dict[str, set[str]] | None = None):
+        dynamic_ref_index: dict[str, set[str]] | None = None,
+        boundary: ProjectBoundary | None = None):
     candidates = [dm for dm in all_dead if not dm.get('safe_to_inline')]
     same_file_live = _batch_same_file_refs(
         candidates, content_cache, label="Checking local promotion refs")
@@ -800,7 +821,8 @@ def _promote_unreferenced(
                     dynamic_ref_index=dynamic_ref_index):
                 has_ref = True
 
-        if promote_unreferenced(dm, contracts, has_ref):
+        if promote_unreferenced(
+                dm, contracts, has_ref, boundary=boundary):
             dm['safe_to_inline'] = True
             promoted += 1
 
@@ -810,9 +832,10 @@ def _promote_unreferenced(
         ui.info(f"Promoted {promoted} unreferenced methods", indent=4)
 
 
-def _has_same_file_refs_direct(method_name: str, param_count: int,
-                               content: str, decl_start: int,
-                               decl_end: int) -> bool:
+def _has_same_file_refs(dm: dict, cm: dict, content: str) -> bool:
+    method_name = dm['name']
+    param_count = dm.get('param_count', 0)
+    decl_start, decl_end = cm['decl_start'], cm['decl_end']
     lines = content.split('\n')
     if param_count == 0:
         call_pat = re.compile(r'(?<!\w)' + re.escape(method_name) + r'\s*\(\s*\)')
@@ -895,9 +918,3 @@ def _batch_same_file_refs(
     if total_files:
         ui.progress_done()
     return live
-
-
-def _has_same_file_refs(dm: dict, cm: dict, content: str) -> bool:
-    return _has_same_file_refs_direct(
-        dm['name'], dm.get('param_count', 0),
-        content, cm['decl_start'], cm['decl_end'])

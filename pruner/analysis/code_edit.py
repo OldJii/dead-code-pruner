@@ -148,19 +148,6 @@ def clean_standalone_booleans(content: str) -> str:
     return clean_standalone_literal_lines(content, {'true;', 'false;'})
 
 
-def clean_standalone_constants(content: str, value: str) -> str:
-    """Remove standalone constant expression statements left after inlining.
-
-    After replacing ``method()`` with *value*, standalone usages like
-    ``method();`` become ``value;`` which is a useless expression statement.
-    Only removes the semicolon-terminated form (``value;``) to avoid
-    breaking Kotlin/Dart expression values or multi-line argument lists.
-    Multi-line assignment RHS lines are preserved.
-    """
-    target_with_semi = value.rstrip(';') + ';'
-    return clean_standalone_literal_lines(content, {target_with_semi})
-
-
 def delete_line_ranges(content: str, ranges: list[tuple[int, int]]) -> tuple[str, int]:
     """Delete *ranges* ``[(start_line, end_line), …]`` from *content*.
 
@@ -382,7 +369,7 @@ def has_cross_file_refs(dm: dict, ref_index: dict, src_abs: str,
         type_ref_index is not None
         and dynamic_ref_index is not None
         # Lowercase/non-conventional type names are intentionally absent
-        # from the compact type index; use the exact legacy scan for them.
+        # from the compact type index; use the exact fallback scan for them.
         and (not cls or cls in type_ref_index)
     )
     if can_use_secondary_indices:

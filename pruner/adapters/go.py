@@ -73,7 +73,7 @@ class GoAdapter(BaseAdapter):
         return names
 
     def field_traits(self, declaration, content: bytes) -> dict:
-        return {'final': True}
+        return {'final': True, 'static': True}
 
     def parameter_count(self, declaration, content: bytes) -> int | None:
         params = declaration.child_by_field_name('parameters')
@@ -105,8 +105,6 @@ class GoAdapter(BaseAdapter):
             return True
         if any(name.startswith(p) for p in _TEST_PREFIXES):
             return True
-        if name and name[0].isupper():
-            return True
         return False
 
     def compute_safe_to_inline(self, record: dict) -> bool:
@@ -116,6 +114,10 @@ class GoAdapter(BaseAdapter):
         if name and name[0].islower():
             return True
         return False
+
+    def is_language_private(self, record: dict) -> bool:
+        name = record.get('name', '')
+        return bool(name and name[0].islower())
 
     def contract_facts(self, content: str) -> dict:
         facts = super().contract_facts(content)
@@ -133,5 +135,4 @@ class GoAdapter(BaseAdapter):
             for iface, required in iface_methods.items():
                 if required and required <= methods:
                     facts['relations'].setdefault(receiver, set()).add(iface)
-                    facts['implementors'].add(receiver)
         return facts

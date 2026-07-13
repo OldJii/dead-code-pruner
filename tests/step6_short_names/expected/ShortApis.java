@@ -16,7 +16,6 @@ class XmlCallbacks {
 
 class FieldConstantsA {
   public static final String LIVE = "live"; // trailing comment must not bind forward
-  public static final String DEAD = "dead"; // genuinely unused
   public static final String SHARED = "a";
 
   boolean isLive(String value) {

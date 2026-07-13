@@ -61,6 +61,19 @@ class BaseAdapter(ABC):
         """Return language-derived ``private/static/final`` flags."""
         return {}
 
+    def field_reference_names(self, declaration, content: bytes,
+                              name: str) -> frozenset[str]:
+        """Return source or generated symbols that can reference a field.
+
+        Most languages expose the declaration name directly.  Adapters may
+        add compiler-generated accessor names used by cross-language callers.
+        """
+        return frozenset({name})
+
+    def field_declaration_span(self, declaration, content: bytes) -> tuple[int, int]:
+        """Return byte bounds for the complete removable declaration."""
+        return declaration.start_byte, declaration.end_byte
+
     @property
     def preserve_branch_scope(self) -> bool:
         """Keep braces when eliminating a branch that declares variables."""
@@ -115,17 +128,15 @@ class BaseAdapter(ABC):
     def contract_facts(self, content: str) -> dict:
         """Extract language-specific type hierarchy and contract facts.
 
-        The result uses five stable keys: ``final``, ``contracts``,
-        ``relations``, ``methods`` and ``implementors``.  Keeping extraction
+        The result uses three stable keys: ``contracts``, ``relations`` and
+        ``methods``.  Keeping extraction
         here prevents grammar-specific regexes from leaking into the shared
         project graph.
         """
         return {
-            'final': set(),
             'contracts': set(),
             'relations': {},
             'methods': {},
-            'implementors': set(),
         }
 
     def is_entry_point(self, record: dict) -> bool:
@@ -139,16 +150,26 @@ class BaseAdapter(ABC):
         return record.get('name', '') in self.protected_names
 
     def compute_safe_to_inline(self, record: dict) -> bool:
-        """Determine whether *record* can be safely inlined/deleted.
+        """Return language-level eligibility for call rewriting/deletion.
 
-        Returns ``True`` when the method's visibility guarantees it cannot be
-        called from outside the declaring file.  Falls back to the generic
-        private-or-static rule when no language-specific logic applies.
+        This answers syntax and dispatch questions only.  The project-boundary
+        policy separately decides whether an externally visible declaration
+        may be deleted.  The generic rule supports private and static calls
+        because both can be resolved precisely by the shared reference index.
         """
         if self.is_entry_point(record):
             return False
         mods = record.get('all_mods', set())
         return 'private' in mods or 'static' in mods
+
+    def is_language_private(self, record: dict) -> bool:
+        """Whether external source consumers cannot name this declaration.
+
+        Project-boundary policy uses this stricter visibility predicate in
+        open-world modules.  ``static`` describes ownership, not visibility,
+        and therefore does not make a declaration private.
+        """
+        return 'private' in (record.get('all_mods', set()) or set())
 
     def can_prune_unreferenced_nonconstant(self, record: dict) -> bool:
         """Whether zero-reference proof is sufficient for a real method body.

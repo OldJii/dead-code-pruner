@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Project-level test runner for Step 5 (inline constant methods) and Step 6 (dead method cleanup).
+Project-level test runner for Step 5 (inline boolean methods) and Step 6 (dead method cleanup).
 Copies input/ to work/, runs the corresponding step, diffs with expected/.
 """
 import os
@@ -85,12 +85,12 @@ def run_dir_test(test_name, test_dir, step_fn):
     return failed == 0
 
 
-def run_full_pipeline_test(test_name, test_dir):
+def run_full_pipeline_test(test_name, test_dir, *, world=None):
     config = os.path.join(SCRIPT_DIR, 'pruner.yaml')
     return run_dir_test(
         test_name,
         test_dir,
-        lambda work_dir: run_full_pipeline(work_dir, config),
+        lambda work_dir: run_full_pipeline(work_dir, config, world=world),
     )
 
 
@@ -105,19 +105,29 @@ def main():
     results.append(run_dir_test('step5_inline', step5_dir, step5_project))
 
     step6_basic = os.path.join(SCRIPT_DIR, 'step6_basic')
-    results.append(run_dir_test('step6_basic', step6_basic, step6_project))
+    results.append(run_dir_test(
+        'step6_basic', step6_basic,
+        lambda root: step6_project(root, world='closed')))
 
     step6_enhanced = os.path.join(SCRIPT_DIR, 'step6_enhanced')
-    results.append(run_dir_test('step6_enhanced', step6_enhanced, step6_project))
+    results.append(run_dir_test(
+        'step6_enhanced', step6_enhanced,
+        lambda root: step6_project(root, world='closed')))
 
     short_names = os.path.join(SCRIPT_DIR, 'step6_short_names')
-    results.append(run_dir_test('step6_short_names', short_names, step6_project))
+    results.append(run_dir_test(
+        'step6_short_names', short_names,
+        lambda root: step6_project(root, world='closed')))
 
     metadata_refs = os.path.join(SCRIPT_DIR, 'step6_metadata_refs')
-    results.append(run_dir_test('step6_metadata_refs', metadata_refs, step6_project))
+    results.append(run_dir_test(
+        'step6_metadata_refs', metadata_refs,
+        lambda root: step6_project(root, world='closed')))
 
     receiver_refs = os.path.join(SCRIPT_DIR, 'step6_receiver_refs')
-    results.append(run_dir_test('step6_receiver_refs', receiver_refs, step6_project))
+    results.append(run_dir_test(
+        'step6_receiver_refs', receiver_refs,
+        lambda root: step6_project(root, world='closed')))
 
     kotlin_trailing = os.path.join(SCRIPT_DIR, 'step6_kotlin_trailing_lambda')
     results.append(run_dir_test(
@@ -125,7 +135,8 @@ def main():
 
     manifest_entry = os.path.join(SCRIPT_DIR, 'step7_manifest_entry')
     results.append(run_dir_test(
-        'step7_manifest_entry', manifest_entry, step7_empty_cleanup))
+        'step7_manifest_entry', manifest_entry,
+        lambda root: step7_empty_cleanup(root, world='closed')))
 
     full_pipeline = os.path.join(SCRIPT_DIR, 'full_pipeline_semantic')
     results.append(run_full_pipeline_test('full_pipeline', full_pipeline))
@@ -133,7 +144,8 @@ def main():
     multilang = os.path.join(SCRIPT_DIR, 'project_multilang')
     for lang in ('java', 'kotlin', 'go', 'swift', 'dart'):
         lang_dir = os.path.join(multilang, lang)
-        results.append(run_full_pipeline_test(f'multilang_{lang}', lang_dir))
+        results.append(run_full_pipeline_test(
+            f'multilang_{lang}', lang_dir, world='closed'))
 
     valid = [r for r in results if r is not None]
     passed = sum(1 for r in valid if r)

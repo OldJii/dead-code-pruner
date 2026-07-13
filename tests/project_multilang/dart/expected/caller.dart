@@ -11,5 +11,4 @@ void multiline(bool flag) {
   use(isOneWay);
 }
 
-bool other() => true;
 void use(bool b) { print(b); }

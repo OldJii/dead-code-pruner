@@ -413,7 +413,6 @@ def _scan_method_records(filepath: str, cb: bytes, ext: str, *,
 
             declaration_end = (adapter.declaration_end_byte(node, body)
                                if adapter else node.end_byte)
-            start_line = byte_to_line(line_offsets, node.start_byte)
             end_line   = byte_to_line(line_offsets, declaration_end)
             anno_start = node.start_byte
             if node.parent:

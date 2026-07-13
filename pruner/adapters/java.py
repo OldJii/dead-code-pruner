@@ -44,8 +44,6 @@ class JavaAdapter(BaseAdapter):
         facts = super().contract_facts(content)
         for match in _TYPE_DECL.finditer(content):
             modifier, kind, name, tail = match.groups()
-            if modifier == 'final':
-                facts['final'].add(name)
             if kind == 'interface' or modifier == 'abstract':
                 facts['contracts'].add(name)
             parents: list[str] = []
@@ -55,7 +53,6 @@ class JavaAdapter(BaseAdapter):
             impl = re.search(r'\bimplements\s+(.+)', tail, re.S)
             if impl:
                 parents.extend(split_type_list(impl.group(1)))
-                facts['implementors'].add(name)
             if parents:
                 facts['relations'][name] = set(parents)
         for name, body in declared_bodies(content, _CONTRACT_BODY):

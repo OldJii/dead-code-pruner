@@ -6,7 +6,7 @@ model:
 
   * **Contracts** — interface / protocol / abstract method signatures that
     concrete types must fulfil.
-  * **Implements / extends** — typed edges from concrete classes to those
+  * **Type relations** — typed edges from concrete classes to those
     contracts and parents.
   * **SafetyPolicy** — decides whether a declaration may be inlined or
     deleted, consulting language adapters + the contract graph.
@@ -23,23 +23,17 @@ class ContractGraph:
     """Project-level type hierarchy and interface/abstract contracts."""
 
     __slots__ = (
-        'children_map', 'final_classes', 'iface_abstract',
-        'implements', 'class_implements', 'iface_methods',
-        'extends', '_facts_by_file',
+        'children_map', 'iface_abstract', 'class_implements', 'iface_methods',
+        '_facts_by_file',
     )
 
     def __init__(self):
         self.children_map: dict[str, set[str]] = defaultdict(set)
-        self.final_classes: set[str] = set()
         self.iface_abstract: set[str] = set()
-        # Classes that implement at least one interface (legacy set)
-        self.implements: set[str] = set()
         # class → set of interface/protocol/parent type names
         self.class_implements: dict[str, set[str]] = defaultdict(set)
         # interface/abstract/protocol → method names
         self.iface_methods: dict[str, set[str]] = defaultdict(set)
-        # class → direct parent class name
-        self.extends: dict[str, str] = {}
         self._facts_by_file: dict[str, dict] = {}
 
     def ingest_file(self, content: str, ext: str, filepath: str) -> None:
@@ -75,14 +69,10 @@ class ContractGraph:
                 self._merge_facts(facts)
 
     def _merge_facts(self, facts: dict) -> None:
-        self.final_classes.update(facts.get('final', ()))
         self.iface_abstract.update(facts.get('contracts', ()))
-        self.implements.update(facts.get('implementors', ()))
         for child, parents in facts.get('relations', {}).items():
             parents = set(parents)
             self.class_implements[child].update(parents)
-            if parents:
-                self.extends.setdefault(child, sorted(parents)[0])
             for parent in parents:
                 self.children_map[parent].add(child)
         for contract, methods in facts.get('methods', {}).items():
@@ -90,18 +80,15 @@ class ContractGraph:
 
     def _rebuild(self) -> None:
         self.children_map = defaultdict(set)
-        self.final_classes = set()
         self.iface_abstract = set()
-        self.implements = set()
         self.class_implements = defaultdict(set)
         self.iface_methods = defaultdict(set)
-        self.extends = {}
         for facts in self._facts_by_file.values():
             self._merge_facts(facts)
 
     def is_contract_method(self, class_name: str | None, method_name: str) -> bool:
         """Return ``True`` if *method_name* fulfils an interface/abstract contract
-        for *class_name* (including inherited implements via extends chain).
+        for *class_name* (including inherited type relations).
         """
         if not class_name or not method_name:
             return False
@@ -116,9 +103,6 @@ class ContractGraph:
                 if method_name in self.iface_methods.get(iface, ()):
                     return True
                 stack.append(iface)
-            parent = self.extends.get(cls)
-            if parent:
-                stack.append(parent)
         # Conservative fallback: class (or any ancestor) implements/extends
         # anything, and method name appears in ANY known interface's method
         # set.  Covers parse gaps on implements lists and indirect hierarchy.
@@ -131,23 +115,11 @@ class ContractGraph:
     def _class_participates_in_hierarchy(self, class_name: str) -> bool:
         """Return ``True`` if *class_name* or any ancestor participates in
         an interface/abstract hierarchy."""
-        seen: set[str] = set()
-        stack = [class_name]
-        while stack:
-            cls = stack.pop()
-            if cls in seen:
-                continue
-            seen.add(cls)
-            if cls in self.implements or self.class_implements.get(cls):
-                return True
-            if cls in self.iface_abstract:
-                return True
-            if self.children_map.get(cls):
-                return True
-            parent = self.extends.get(cls)
-            if parent:
-                stack.append(parent)
-        return False
+        return bool(
+            self.class_implements.get(class_name)
+            or class_name in self.iface_abstract
+            or self.children_map.get(class_name)
+        )
 
     def has_polymorphic_targets(self, class_name: str | None) -> bool:
         """``True`` when *class_name* may be invoked through a parent/interface."""
@@ -155,7 +127,7 @@ class ContractGraph:
             return True
         if class_name in self.iface_abstract:
             return True
-        if class_name in self.implements or self.class_implements.get(class_name):
+        if self.class_implements.get(class_name):
             return True
         if self.children_map.get(class_name):
             return True
@@ -164,8 +136,7 @@ class ContractGraph:
 
 # ── Safety policy ───────────────────────────────────────────
 
-def is_safe_to_remove(record: dict, graph: ContractGraph,
-                      *, require_zero_arg_for_inline: bool = False) -> bool:
+def is_safe_to_remove(record: dict, graph: ContractGraph, *, boundary=None) -> bool:
     """Unified safety decision for deleting/inlining a method record.
 
     Returns ``False`` (keep) when:
@@ -211,6 +182,10 @@ def is_safe_to_remove(record: dict, graph: ContractGraph,
             and any(name in methods for methods in graph.iface_methods.values())):
         return False
 
+    from .project_boundary import boundary_allows_record
+    if not boundary_allows_record(record, boundary):
+        return False
+
     # Visibility only — leaf/final does NOT auto-promote public instance.
     if adapter:
         return bool(adapter.compute_safe_to_inline(record))
@@ -218,11 +193,11 @@ def is_safe_to_remove(record: dict, graph: ContractGraph,
 
 
 def promote_unreferenced(record: dict, graph: ContractGraph,
-                         has_any_ref: bool) -> bool:
+                         has_any_ref: bool, *, boundary=None) -> bool:
     """Promote an otherwise-unsafe method when project-wide refs are absent.
 
-    Never promotes contract methods, enum members, or polymorphic interface
-    implementors whose method name matches a known contract symbol.
+    Never promotes contract methods, enum members, or polymorphic types whose
+    method name matches a known contract symbol.
     """
     if has_any_ref:
         return False
@@ -242,19 +217,25 @@ def promote_unreferenced(record: dict, graph: ContractGraph,
     if 'override' in mods or 'Override' in mods:
         return False
 
+    from .project_boundary import boundary_allows_record
+    if not boundary_allows_record(record, boundary):
+        return False
+
     # Static / private: always promotable when unreferenced
     if record.get('is_static') or record.get('is_private'):
         return True
 
+    # Top-level functions have no class hierarchy to consult.  They are
+    # removable only when the owning module is explicitly/detectably closed.
+    if (boundary is not None and not cls
+            and boundary.allows_external_api_pruning(record.get('filepath', ''))):
+        return True
+
     # Public/protected/package instance: only when the name is not a known
     # interface/abstract method anywhere (guards parse gaps), and the type
-    # is a leaf (or final) so we are not removing a base API.
+    # does not participate in a hierarchy.
     if any(name in ms for ms in graph.iface_methods.values()):
         return False
     if cls and graph._class_participates_in_hierarchy(cls):
         return False
-    is_final = cls in graph.final_classes if cls else False
-    has_children = bool(graph.children_map.get(cls)) if cls else True
-    if is_final or not has_children:
-        return True
-    return False
+    return bool(cls)

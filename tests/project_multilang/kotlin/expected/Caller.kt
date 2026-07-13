@@ -10,5 +10,4 @@ fun multiline(flag: Boolean) {
   use(false)
 }
 
-fun other(): Boolean = true
 fun use(b: Boolean) { println(b) }

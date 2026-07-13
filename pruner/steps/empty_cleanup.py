@@ -13,6 +13,9 @@ from ..ast_utils import parse, find_all_multi, txt, build_line_offsets, byte_to_
 from ..lang import _PARSERS, SKIP_DIRS
 from .. import ui
 from ..analysis.ref_index import REFERENCE_EXTS
+from ..analysis.project_boundary import (
+    ProjectBoundary, boundary_allows_record, detect_project_boundary,
+)
 from ..validation import validate_transformation
 
 _CLASS_NODE_TYPES = frozenset({
@@ -45,6 +48,29 @@ def _find_class_name(node, cb: bytes) -> str | None:
         if c.type in ('identifier', 'simple_identifier', 'type_identifier'):
             return txt(c, cb)
     return None
+
+
+def _class_modifiers(node, cb: bytes) -> set[str]:
+    modifiers: set[str] = set()
+    for child in node.children:
+        if child.type == 'modifiers':
+            for modifier in child.children:
+                modifiers.add(txt(modifier, cb).strip())
+        elif child.type in ('modifier', 'visibility_modifier',
+                            'access_control', 'inheritance_modifier'):
+            modifiers.add(txt(child, cb).strip())
+    return modifiers
+
+
+def _class_has_annotation(node) -> bool:
+    stack = list(node.children)
+    while stack:
+        child = stack.pop()
+        if child.type in ('annotation', 'marker_annotation', 'attribute'):
+            return True
+        if child.type in ('modifiers', 'modifier'):
+            stack.extend(child.children)
+    return False
 
 
 def _find_class_body(node):
@@ -139,7 +165,9 @@ def _file_has_only_imports(content: str) -> bool:
 
 
 def step7_empty_cleanup(root_dir: str, dry_run: bool = False, *,
-                        show_header: bool = True) -> dict:
+                        show_header: bool = True,
+                        boundary: ProjectBoundary | None = None,
+                        world: str = 'auto') -> dict:
     """Remove empty classes and delete empty files.
 
     Returns ``{'classes_removed': int, 'files_deleted': int}``.
@@ -150,6 +178,7 @@ def step7_empty_cleanup(root_dir: str, dry_run: bool = False, *,
         ui.section("Empty Class & File Cleanup")
     else:
         ui.stage("Cleaning empty classes and files")
+    boundary = boundary or detect_project_boundary(root_dir, mode=world)
 
     source_files: list[str] = []
     reference_files: list[str] = []
@@ -185,6 +214,15 @@ def step7_empty_cleanup(root_dir: str, dry_run: bool = False, *,
                     continue
                 name = _find_class_name(node, cb)
                 if not name:
+                    continue
+                if _class_has_annotation(node):
+                    continue
+                record = {
+                    'name': name,
+                    'filepath': fp,
+                    'all_mods': _class_modifiers(node, cb),
+                }
+                if not boundary_allows_record(record, boundary):
                     continue
                 if node.parent and node.parent.type in _CLASS_NODE_TYPES:
                     continue

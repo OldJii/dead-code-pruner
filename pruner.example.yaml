@@ -4,6 +4,15 @@
 # Patterns are matched as literal text in source code — use the exact
 # identifier your codebase references (Java field, Go const, Rust static, etc.).
 
+# auto treats unpublished modules inside an application/service Gradle build
+# as closed, preserves published or standalone library/SDK surfaces as open,
+# and safely falls back to open when ownership is ambiguous.
+project_boundary:
+  mode: auto
+  # modules:
+  #   ":app": closed
+  #   ":sdk": open
+
 replacements:
   - pattern: "AppConfig.IS_DEBUG"
     value: false

@@ -63,7 +63,7 @@ def _modifiers(node, cb: bytes) -> set[str]:
     return mods
 
 
-def _has_annotation(node) -> bool:
+def _has_annotation(node, declaration_start: int | None = None) -> bool:
     """Return whether a field declaration is annotation-managed."""
     stack = list(node.children)
     while stack:
@@ -72,12 +72,28 @@ def _has_annotation(node) -> bool:
             return True
         if child.type in ('modifiers', 'modifier'):
             stack.extend(child.children)
+    if node.parent:
+        index = next((i for i, sibling in enumerate(node.parent.children)
+                      if sibling.id == node.id), None)
+        if index is not None:
+            start = node.start_byte if declaration_start is None else declaration_start
+            for previous in reversed(node.parent.children[:index]):
+                if previous.start_byte >= start:
+                    continue
+                if previous.type in ('annotation', 'marker_annotation',
+                                     'attribute', 'metadata'):
+                    return True
+                if previous.type in ('comment', 'block_comment', 'line_comment',
+                                     'multiline_comment'):
+                    continue
+                break
     return False
 
 
-def _leading_doc_start(node, cb: bytes) -> int:
+def _leading_doc_start(node, cb: bytes,
+                       declaration_start: int | None = None) -> int:
     """Include immediately preceding comments/annotations in the span."""
-    start = node.start_byte
+    start = node.start_byte if declaration_start is None else declaration_start
     if not node.parent:
         return start
     idx = None
@@ -89,6 +105,8 @@ def _leading_doc_start(node, cb: bytes) -> int:
         return start
     for j in range(idx - 1, -1, -1):
         prev = node.parent.children[j]
+        if prev.start_byte >= start:
+            continue
         if prev.type in ('annotation', 'marker_annotation', 'attribute',
                           'comment', 'block_comment', 'line_comment',
                           'multiline_comment'):
@@ -156,8 +174,8 @@ def scan_fields(filepath: str, cb: bytes, ext: str,
                 root_node=None, line_offsets=None) -> list[dict]:
     """Return field/constant records for *filepath*.
 
-    Each record: name, class_name, is_private, is_static, is_final,
-    decl_start, decl_end, start_byte, end_byte, filepath, module.
+    Each record: name, reference_names, class_name, is_private, is_static,
+    is_final, decl_start, decl_end, start_byte, end_byte, filepath, module.
 
     When *root_node* and *line_offsets* are provided, skip re-parsing
     (used by unified scan to share a single parse per file).
@@ -194,17 +212,21 @@ def scan_fields(filepath: str, cb: bytes, ext: str,
                 continue
 
             mods = _modifiers(node, cb)
-            has_annotation = _has_annotation(node)
+            span_start, span_end = (
+                adapter.field_declaration_span(node, cb)
+                if adapter else (node.start_byte, node.end_byte))
+            has_annotation = _has_annotation(node, span_start)
             class_name, class_type = _enclosing_class(node, cb)
-            if class_type == 'interface_declaration' and 'static' not in mods:
-                pass
 
             adapter_names = adapter.field_names(node, cb) if adapter else None
             traits = adapter.field_traits(node, cb) if adapter else {}
             for name in adapter_names if adapter_names is not None else _field_names(node, cb):
-                start = _leading_doc_start(node, cb)
+                start = _leading_doc_start(node, cb, span_start)
                 fields.append({
                     'name': name,
+                    'reference_names': (
+                        adapter.field_reference_names(node, cb, name)
+                        if adapter else frozenset({name})),
                     'kind': 'field',
                     'class_name': class_name,
                     'class_type': class_type,
@@ -218,9 +240,9 @@ def scan_fields(filepath: str, cb: bytes, ext: str,
                     'all_mods': mods,
                     'has_annotation': has_annotation,
                     'decl_start': byte_to_line(line_offsets, start),
-                    'decl_end': byte_to_line(line_offsets, node.end_byte),
+                    'decl_end': byte_to_line(line_offsets, span_end),
                     'start_byte': start,
-                    'end_byte': node.end_byte,
+                    'end_byte': span_end,
                     'filepath': filepath,
                     'module': module,
                     'source_set': source_set,

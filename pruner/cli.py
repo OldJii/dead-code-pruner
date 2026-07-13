@@ -30,6 +30,8 @@ Examples:
                     help='Scan and report only, do not modify files')
     ap.add_argument('--phases', default=None,
                     help='Comma-separated phases to run (default: 1,2,3)')
+    ap.add_argument('--world', choices=('auto', 'closed', 'open'), default=None,
+                    help='Override project-boundary detection')
 
     args = ap.parse_args()
 
@@ -54,6 +56,7 @@ Examples:
         config_path,
         dry_run=args.dry_run,
         phases=phases,
+        world=args.world,
     )
 
 

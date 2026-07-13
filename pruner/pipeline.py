@@ -4,7 +4,7 @@ Pipeline:
   Phase 1: Constant folding + boolean simplification (iterative convergence)
       step1 → step2 → step3 → step4, loop until no changes.
 
-  Phase 2: Constant-returning method inlining + cascade simplification
+  Phase 2: Boolean-returning method inlining + cascade simplification
       step5 → step1-4 cascade, loop until no new inlines.
 
   Phase 3: Dead method cleanup + cascade simplification
@@ -13,7 +13,7 @@ Pipeline:
   Quality gate: Validate all modified files and report statistics.
 
 When both Phase 2 and Phase 3 are enabled (default), Phase 2 is merged
-into Phase 3 — step6 already handles constant-method inlining — avoiding
+into Phase 3 — step6 already handles boolean-method inlining — avoiding
 a redundant full-project scan.
 
 Every phase prints clear progress, per-round stats, and elapsed time
@@ -34,6 +34,8 @@ from .steps.empty_cleanup import step7_empty_cleanup
 from .validation import count_ast_errors
 from .analysis.project_layout import ProjectLayout
 from .analysis.project_scan import scan_project
+from .analysis.project_boundary import ProjectBoundary, detect_project_boundary
+from .config import load_boundary_options
 from . import ui
 
 _MIN_PARALLEL = 200
@@ -262,12 +264,12 @@ def _snapshot_all_sources(target: str):
 
 
 def run_phase_2(target: str, replacements: list, dry_run: bool) -> tuple[int, float]:
-    ui.banner("Phase 2  Constant-Return Method Inlining")
+    ui.banner("Phase 2  Boolean Method Inlining")
     t0 = time.time()
     total = 0
     max_rounds = 10
     for r in range(1, max_rounds + 1):
-        ui.round_header(r, "Constant-return method inlining")
+        ui.round_header(r, "Boolean method inlining")
         t_inline = time.time()
         inline_cnt, modified = step5_project(
             target, dry_run=dry_run, show_header=False)
@@ -293,7 +295,8 @@ def run_phase_2(target: str, replacements: list, dry_run: bool) -> tuple[int, fl
 
 # ── Phase 3 ───────────────────────────────────────────────────
 
-def run_phase_3(target: str, replacements: list, dry_run: bool) -> tuple[int, float]:
+def run_phase_3(target: str, replacements: list, dry_run: bool, *,
+                boundary: ProjectBoundary | None = None) -> tuple[int, float]:
     ui.banner("Phase 3  Dead Method Cleanup")
     t0 = time.time()
     total = 0
@@ -301,13 +304,15 @@ def run_phase_3(target: str, replacements: list, dry_run: bool) -> tuple[int, fl
 
     # One unified scan for ALL rounds — subsequent rounds update
     # incrementally instead of re-scanning the full project.
-    scan = scan_project(target, progress_interval=500)
+    scan = scan_project(
+        target, progress_interval=500, boundary=boundary)
 
     for r in range(1, max_rounds + 1):
         ui.round_header(r, "Dead declaration cleanup")
         t_dead = time.time()
         dead_cnt, modified = step6_project(
-            target, dry_run=dry_run, scan=scan, show_header=False)
+            target, dry_run=dry_run, scan=scan, show_header=False,
+            boundary=boundary)
         ui.info(f"Cleaned {ui.bold(str(dead_cnt))} items  "
                 f"{ui.dim(ui.fmt_elapsed(time.time() - t_dead))}")
 
@@ -363,6 +368,7 @@ def run_full_pipeline(
     *,
     dry_run: bool = False,
     phases: list[int] | None = None,
+    world: str | None = None,
     _simulation: bool = False,
     _display_target: str | None = None,
 ) -> dict:
@@ -372,21 +378,34 @@ def run_full_pipeline(
             simulated_target = _copy_simulation_target(target, temp_root)
             return run_full_pipeline(
                 simulated_target, config_path, dry_run=False, phases=phases,
-                _simulation=True, _display_target=target)
+                world=world, _simulation=True, _display_target=target)
 
     pipeline_start = time.time()
     report_dry_run = dry_run or _simulation
     mode = "DRY-RUN" if report_dry_run else "EXECUTE"
 
     replacements = load_config(config_path)
+    configured_world, module_worlds = load_boundary_options(config_path)
+    selected_world = world or configured_world
 
     layout = ProjectLayout(target) if os.path.isdir(target) else None
     layout_desc = f"{layout.kind} ({len(layout.modules)} module(s))" if layout else "single file"
+    boundary = (detect_project_boundary(
+        target, layout=layout, mode=selected_world,
+        module_overrides=module_worlds) if layout else None)
 
     ui.banner(f"dead-code-pruner  [{mode}]")
     ui.kv("Engine", "tree-sitter AST")
     ui.kv("Target", _display_target or target)
     ui.kv("Layout", layout_desc)
+    if boundary:
+        ui.kv("Project boundary", boundary.summary())
+        if len(boundary.modules) == 1:
+            ui.kv("Boundary evidence", ', '.join(boundary.modules[0].reasons))
+        elif boundary.world == 'mixed':
+            for module in boundary.modules:
+                reason = ', '.join(module.reasons)
+                ui.info(f"         {module.name}: {module.world} ({reason})")
     ui.kv("Config", config_path)
     ui.kv("Rules", f"{len(replacements)} replacement(s)")
     for p, v in replacements:
@@ -411,7 +430,7 @@ def run_full_pipeline(
         grand_total += cnt
 
     # When both Phase 2 and Phase 3 are enabled, skip Phase 2 — step6
-    # (Phase 3) already handles constant-method inlining, void-call
+    # (Phase 3) already handles boolean-method inlining, void-call
     # removal, and definition deletion.  This saves one full project scan.
     phase2_merged = 2 in phases and 3 in phases
     if 2 in phases and not phase2_merged and os.path.isdir(target):
@@ -424,13 +443,14 @@ def run_full_pipeline(
         pre_rollback_count = _run_quality_gate_rollback(target)
 
     if 3 in phases and os.path.isdir(target):
-        cnt, elapsed = run_phase_3(target, replacements, dry_run)
+        cnt, elapsed = run_phase_3(
+            target, replacements, dry_run, boundary=boundary)
         results['phase_3'] = {'changes': cnt, 'elapsed': elapsed}
         grand_total += cnt
 
         t_cleanup = time.time()
         cleanup = step7_empty_cleanup(
-            target, dry_run=dry_run, show_header=False)
+            target, dry_run=dry_run, show_header=False, boundary=boundary)
         cleanup_cnt = cleanup['classes_removed'] + cleanup['files_deleted']
         if cleanup_cnt > 0:
             results['cleanup'] = {
@@ -519,4 +539,17 @@ def run_full_pipeline(
         'lines_removed': lines_removed,
         'rejected': rejected_count,
     }
+    if boundary:
+        results['project_boundary'] = {
+            'world': boundary.world,
+            'modules': [
+                {
+                    'name': module.name,
+                    'world': module.world,
+                    'reasons': list(module.reasons),
+                    'explicit': module.explicit,
+                }
+                for module in boundary.modules
+            ],
+        }
     return results

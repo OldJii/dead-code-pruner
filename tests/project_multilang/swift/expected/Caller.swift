@@ -9,5 +9,4 @@ func multiline(flag: Bool) {
   use(false)
 }
 
-func other() -> Bool { return true }
 func use(_ b: Bool) { print(b) }

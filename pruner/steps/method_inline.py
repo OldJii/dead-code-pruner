@@ -1,4 +1,4 @@
-"""Step 5 — inline constant-returning private/static methods.
+"""Step 5 — inline boolean-returning private/static methods.
 
 Scans the entire project for zero-arg methods that return a boolean
 constant, replaces all call sites with the literal value, and deletes
@@ -16,25 +16,25 @@ from .. import ui
 from ..analysis.method_scanner import scan_method_definitions, scan_methods
 from ..analysis.project_scan import semantic_method_key
 from ..analysis.project_layout import ProjectLayout
+from ..analysis.project_boundary import language_private
 from ..analysis.ref_index import (
     collect_files, build_ref_index, is_in_comment_or_string,
 )
 from ..analysis.code_edit import (
     replace_calls_in_content, clean_standalone_booleans,
-    clean_standalone_constants, delete_line_ranges,
-    has_dynamic_symbol_ref, verify_no_dangling_calls,
+    delete_line_ranges, has_dynamic_symbol_ref, verify_no_dangling_calls,
 )
 from ..validation import validate_transformation
 
 
 def step5_project(root_dir: str, dry_run: bool = False, *,
                   show_header: bool = True) -> tuple[int, set[str]]:
-    """Inline constant methods project-wide.
+    """Inline boolean constant methods project-wide.
 
     Returns ``(total_inlined, modified_files)``."""
     t0 = time.time()
     if show_header:
-        ui.section("Constant-Return Method Inlining")
+        ui.section("Boolean Method Inlining")
     layout = ProjectLayout(root_dir)
     all_files = collect_files(root_dir)
     ui.info(f"Scanning {len(all_files)} files...")
@@ -60,7 +60,7 @@ def step5_project(root_dir: str, dry_run: bool = False, *,
             methods = scan_method_definitions(fp, cb, ext, module=mod_name)
             for m in methods:
                 all_defs_by_key[semantic_method_key(m)].append(m)
-                if (m.get('is_dead_candidate') and m['kind'] in ('boolean', 'constant')
+                if (m.get('is_dead_candidate') and m['kind'] == 'boolean'
                         and m['param_count'] == 0 and m['safe_to_inline']):
                     all_methods.append(m)
         except Exception as e:
@@ -68,7 +68,7 @@ def step5_project(root_dir: str, dry_run: bool = False, *,
     ui.progress_done()
 
     if not all_methods:
-        ui.info("No constant methods found.")
+        ui.info("No boolean constant methods found.")
         return 0, set()
 
     variant_conflicts = set()
@@ -83,12 +83,12 @@ def step5_project(root_dir: str, dry_run: bool = False, *,
     all_methods = [m for m in all_methods if semantic_method_key(m) not in variant_conflicts]
 
     if not all_methods:
-        ui.info("No constant methods found after source-set safety checks.")
+        ui.info("No boolean constant methods found after source-set safety checks.")
         return 0, set()
 
     private_cnt = sum(1 for m in all_methods if m['is_private'])
     static_cnt  = sum(1 for m in all_methods if m['is_static'] and not m['is_private'])
-    ui.info(f"Found {ui.bold(str(len(all_methods)))} constant methods "
+    ui.info(f"Found {ui.bold(str(len(all_methods)))} boolean constant methods "
             f"(private={private_cnt}, static={static_cnt})")
 
     if dry_run:
@@ -127,8 +127,6 @@ def step5_project(root_dir: str, dry_run: bool = False, *,
                     content, m['name'], m['value'], m['class_name'],
                     same_file=True, class_lines=cls_scope)
                 content = clean_standalone_booleans(content)
-                if m['value'] not in ('true', 'false'):
-                    content = clean_standalone_constants(content, m['value'])
                 cnt += c
             if content != original:
                 ext_v = os.path.splitext(src)[1].lower()
@@ -168,8 +166,7 @@ def step5_project(root_dir: str, dry_run: bool = False, *,
                     continue
                 content, c = replace_calls_in_content(
                     content, name, value, cls, same_file=False)
-                if value not in ('true', 'false'):
-                    content = clean_standalone_constants(content, value)
+                content = clean_standalone_booleans(content)
                 cnt += c
             if content != original:
                 ext_v = os.path.splitext(ref_file)[1].lower()
@@ -189,7 +186,7 @@ def step5_project(root_dir: str, dry_run: bool = False, *,
     deleted = 0
     by_file: dict[str, list] = defaultdict(list)
     for m in all_methods:
-        if m['is_private']:
+        if language_private(m):
             by_file[m['filepath']].append(m)
 
     total_delete_files = len(by_file)
@@ -206,7 +203,7 @@ def step5_project(root_dir: str, dry_run: bool = False, *,
             for dm in methods:
                 for cm in current_methods:
                     if (cm['name'] == dm['name']
-                            and cm['kind'] in ('boolean', 'constant')
+                            and cm['kind'] == 'boolean'
                             and cm['value'] == dm['value']):
                         has_ref = False
                         call_pat = re.compile(r'(?<!\w)' + re.escape(dm['name']) + r'\s*\(\s*\)')

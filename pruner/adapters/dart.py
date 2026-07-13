@@ -57,14 +57,28 @@ class DartAdapter(BaseAdapter):
 
     @property
     def field_node_types(self) -> frozenset[str]:
-        return frozenset({'declaration'})
+        # The Dart grammar represents class fields and top-level constants
+        # differently; local declarations are filtered by field_scanner's
+        # enclosing-function check.
+        return frozenset({
+            'declaration', 'field_declaration', 'local_variable_declaration',
+            'static_final_declaration_list',
+        })
 
     def field_names(self, declaration, content: bytes) -> list[str] | None:
+        if (declaration.type == 'static_final_declaration_list'
+                and declaration.parent is not None
+                and declaration.parent.type != 'program'):
+            # Class constants use their outer declaration so the deletion span
+            # includes modifiers and types.  Top-level constants have no outer
+            # declaration node and are represented by this list directly.
+            return []
         names: list[str] = []
         stack = list(declaration.named_children)
         while stack:
             node = stack.pop()
-            if node.type in ('initialized_identifier', 'static_final_declaration'):
+            if node.type in ('initialized_identifier', 'static_final_declaration',
+                             'variable_declarator'):
                 identifier = next((c for c in node.named_children
                                    if c.type == 'identifier'), None)
                 if identifier is not None:
@@ -74,9 +88,35 @@ class DartAdapter(BaseAdapter):
         return names
 
     def field_traits(self, declaration, content: bytes) -> dict:
+        if declaration.type == 'static_final_declaration_list':
+            return {'final': True, 'static': True}
         raw = content[declaration.start_byte:declaration.end_byte]
         return {'final': b'const ' in raw or b'final ' in raw,
                 'static': b'static ' in raw}
+
+    def field_declaration_span(self, declaration, content: bytes) -> tuple[int, int]:
+        if (declaration.type != 'static_final_declaration_list'
+                or declaration.parent is None
+                or declaration.parent.type != 'program'):
+            return super().field_declaration_span(declaration, content)
+        siblings = declaration.parent.children
+        index = next((i for i, node in enumerate(siblings)
+                      if node.id == declaration.id), None)
+        if index is None:
+            return declaration.start_byte, declaration.end_byte
+        start = declaration.start_byte
+        end = declaration.end_byte
+        for previous in reversed(siblings[:index]):
+            if previous.type in ('const_builtin', 'final_builtin',
+                                 'type_identifier'):
+                start = previous.start_byte
+                continue
+            break
+        for following in siblings[index + 1:]:
+            if following.type == ';':
+                end = following.end_byte
+            break
+        return start, end
 
     @property
     def local_boolean_patterns(self):
@@ -161,12 +201,13 @@ class DartAdapter(BaseAdapter):
         mods = record.get('all_mods', set())
         return 'static' in mods
 
+    def is_language_private(self, record: dict) -> bool:
+        return record.get('name', '').startswith('_')
+
     def contract_facts(self, content: str) -> dict:
         facts = super().contract_facts(content)
         for match in _TYPE_DECL.finditer(content):
             modifier, name, tail = match.groups()
-            if modifier in ('final', 'sealed'):
-                facts['final'].add(name)
             if modifier == 'abstract':
                 facts['contracts'].add(name)
             parents: list[str] = []
@@ -178,8 +219,6 @@ class DartAdapter(BaseAdapter):
                     parents.extend(split_type_list(rel.group(1)))
             if parents:
                 facts['relations'][name] = set(parents)
-            if 'implements' in tail:
-                facts['implementors'].add(name)
         for name, body in declared_bodies(content, _ABSTRACT_BODY):
             facts['methods'][name] = {
                 m.group(1) for m in _ABSTRACT_METHOD.finditer(body)

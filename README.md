@@ -2,7 +2,7 @@
 
 Conservative multi-language dead-code elimination powered by tree-sitter.
 
-dead-code-pruner is a static analysis and source cleanup tool for removing dead code after feature flag cleanup, boolean constant folding, and compile-time configuration changes. Give it a constant mapping and it folds configured flags, simplifies boolean/control-flow expressions, eliminates dead branches, inlines constant-return methods, removes provably-unused methods and fields, and protects dynamic framework entry points through iterative project-level analysis.
+dead-code-pruner is a static analysis and source cleanup tool for removing dead code after feature flag cleanup, boolean constant folding, and compile-time configuration changes. Give it a constant mapping and it folds configured flags, simplifies boolean/control-flow expressions, eliminates dead branches, inlines boolean-returning methods, removes provably-unused methods and fields, and protects dynamic framework entry points through iterative project-level analysis.
 
 Built on [tree-sitter](https://tree-sitter.github.io/) for format-agnostic, comment-safe, multi-language analysis.
 
@@ -26,9 +26,9 @@ The tool runs a **3-phase + cleanup pipeline**. Per-file work reaches a fixed po
 | Phase | Steps | Purpose |
 |-------|-------|---------|
 | **1** | Constant fold → local propagation → bool simplify → compound bool → if-block eliminate → unreachable removal → unused var cleanup | One project pass; every file converges internally |
-| **2** | Constant-return method inlining → cascade simplify | Available as an isolated phase; merged into Phase 3 in the default full run |
-| **3** | Unified scan → constant/empty and adapter-approved method cleanup → private field cleanup → incremental re-scan | Remove declarations and converge project-wide without repeated full scans |
-| **Cleanup** | Empty class detection → reference check → removal | Remove classes left empty after method deletion |
+| **2** | Boolean-return method inlining → cascade simplify | Available as an isolated phase; merged into Phase 3 in the default full run |
+| **3** | Unified scan → project-boundary-aware method/field cleanup → incremental re-scan | Use closed-world rules for applications/services and API-preserving rules for libraries |
+| **Cleanup** | Boundary-aware empty class detection → reference check → removal | Preserve externally visible library types while removing closed-world leftovers |
 
 Each phase can trigger new simplification opportunities in earlier steps — the pipeline converges automatically.
 
@@ -68,17 +68,16 @@ Each phase can trigger new simplification opportunities in earlier steps — the
 | Local constant propagation | `final boolean isPrimary = true; if (isPrimary)` | `if (true)` → eliminated |
 | Unused boolean var cleanup | `final boolean isPrimary = true;` (no remaining uses) | *(removed)* |
 
-### Phase 2: Constant-Return Method Inlining
+### Phase 2: Boolean Method Inlining
 
 | Transformation | Description |
 |---|---|
 | Boolean method inlining | `private fun isEnabled(): Boolean = true` → all `isEnabled()` replaced with `true` |
-| String/int/null method inlining | `private static String getRegion() { return "primary"; }` → replaced with `"primary"` |
 | Static method inlining | `static boolean isOldMode() { return false; }` → `ClassName.isOldMode()` replaced with `false` |
 | Cascade simplification | After inlining, Phase 1 re-runs to simplify newly-constant expressions |
 | Private method deletion | After all call sites are inlined, the now-orphaned method definition is removed |
 
-Supported inlined return types: `boolean`, `int`, `long`, `float`, `double`, `String`, and negative numeric literals. `null`/`nil` returns are detected but not substituted at call sites because the required target type is not inferred.
+Only boolean-returning methods are inlined because their literals unlock dead-branch cleanup. String, numeric, and `null`/`nil` getters are not propagated into callers; they remain encapsulated while referenced and are deleted only when project-wide analysis proves the definition unused.
 
 ### Phase 3: Dead Member Cleanup
 
@@ -112,7 +111,7 @@ The tool is **conservative by design** — when in doubt, code is kept.
 | **Override methods** | `override fun onResume()` | Called by framework, not user code |
 | **Native methods** | `native void jni_call();` | JNI/FFI binding |
 | **Framework lifecycle methods** | `onCreate`, `viewDidLoad`, `build`, `main`, `init`, `ServeHTTP` | Language adapter protects them by name |
-| **Go exported functions** | `func HandleRequest(...)` (uppercase) | Part of public API |
+| **Open-world public API** | Java/Kotlin public members, Go exports, Swift public declarations, Dart public names | May be called by consumers outside the scanned repository |
 | **Dart private naming** | `_helper()` is library-private | Constant/empty cleanup is supported; arbitrary bodies remain unless the adapter can prove every reference form |
 | **Dynamic references** | `#selector(doAction)`, `android:onClick`, XML `action`/`selector` attributes | Layout, Storyboard, and generated callback references are scanned |
 | **Static and inherited calls** | Java/Kotlin static imports and calls through subclasses | Project indexes resolve imported and transitively inherited members |
@@ -164,6 +163,10 @@ python3 -m pruner . --dry-run
 # Run specific phases
 python3 -m pruner . --phases 1          # constant folding only
 python3 -m pruner . --phases 1,2        # phases 1 + 2
+
+# Override automatic project-boundary detection
+python3 -m pruner . --world closed       # application / deployed service
+python3 -m pruner . --world open         # library / SDK
 ```
 
 ## Configuration
@@ -171,6 +174,12 @@ python3 -m pruner . --phases 1,2        # phases 1 + 2
 ### YAML (recommended)
 
 ```yaml
+project_boundary:
+  mode: auto
+  modules:
+    ":app": closed
+    ":sdk": open
+
 replacements:
   - pattern: "AppConfig.IS_DEBUG"
     value: false
@@ -209,6 +218,10 @@ The tool automatically detects multi-module project layouts:
 
 Module awareness prevents same-named methods in different modules from being conflated during analysis. For example, `ModuleA:Utils.isEnabled()` and `ModuleB:Utils.isEnabled()` are tracked independently.
 
+The same module map drives project-boundary detection. Application, executable, service, Flutter app, root Go executable, and Xcode app metadata are strong closed-world signals. Unpublished Gradle library modules inside such a build share the host's closed boundary because the library plugin describes compilation shape rather than external ownership. Publishing metadata and standalone library products are open-world signals and win conflicts; missing or ambiguous standalone layouts also fall back to open-world cleanup.
+
+Closed-world modules may remove unreferenced externally visible declarations because every source consumer is expected inside the scan. Open-world modules only delete language-private declarations; public methods, constants, fields, and empty types remain available to external consumers. Mixed repositories apply the policy independently per module. `project_boundary.modules` or `--world` handles internal libraries, unusual build logic, and deployment layouts that cannot be inferred statically.
+
 ## Architecture
 
 ```
@@ -237,7 +250,7 @@ pruner/
 │   ├── if_blocks.py        Step 4: dead branch elimination
 │   ├── unreachable.py      Step 1d: unreachable code removal
 │   ├── kotlin_expr.py      Kotlin if-expression pre-pass
-│   ├── method_inline.py    Step 5: constant method inlining (bool + non-bool)
+│   ├── method_inline.py    Step 5: boolean method inlining
 │   ├── dead_methods.py     Step 6: dead method cleanup
 │   └── empty_cleanup.py    Step 7: empty class & file cleanup
 └── analysis/           Project-level analysis
@@ -246,6 +259,7 @@ pruner/
     ├── contracts.py          Incremental per-file contract graph
     ├── project_scan.py       Unified single-pass project scan
     ├── project_layout.py     Multi-module project detection
+    ├── project_boundary.py   Closed/open-world detection and module policy
     ├── ref_index.py          Cross-file reference index
     ├── text_index.py         Compact textual and dynamic-reference index
     └── code_edit.py          Call-site replacement & deletion
@@ -258,10 +272,12 @@ pruner/
 - **AST validation gate**: every transformation is validated — changes that introduce new parse errors are automatically rolled back
 - **Per-file rollback**: project-level method, field, and empty-class edits are parsed again before being committed to disk
 - **Language adapters**: each ecosystem has dedicated entry-point and visibility rules (lifecycle methods, annotations, naming conventions)
+- **Project-boundary aware**: applications/services use closed-world cleanup; libraries/SDKs preserve external APIs; unknown modules default to open
 - **Annotation-safe**: annotated methods and fields are never deleted (framework/DI/AOP/generated-code managed)
 - **Chain-call aware**: instance methods called via `obj.field.method()` are detected via cross-file reference analysis
 - **Inheritance-aware**: skips abstract, interface, and framework base-class methods, and resolves inherited static calls transitively
 - **Import-aware**: Java and Kotlin static imports are indexed before removing member declarations
+- **JVM accessor-aware**: Java calls to getters generated for Kotlin properties, including delegated and boolean-style properties, protect the source declaration
 - **Dynamic-resource aware**: Android XML callbacks/actions and Apple selector references protect their source declarations
 - **Overload-safe**: parameter count matching prevents confusing overloaded methods
 - **Declaration-safe**: comments cannot bind to the following declaration, and multi-variable fields are removed atomically
@@ -291,14 +307,15 @@ pruner/
 python3 tests/run_tests.py           # 5-language step 1–4 tests
 python3 tests/run_project_tests.py   # 14 project-level safety and cleanup suites
 python3 tests/test_language_matrix.py # 5-language syntax/safety/project parity matrix
+python3 tests/test_project_boundary.py # app, SDK, service, mixed-repo boundary policy
 python3 tests/test_ui.py             # in-place progress and hierarchy rendering
 ```
 
 ## Limitations
 
 - Local propagation is limited to immutable booleans (`final boolean`, Kotlin `val`, Go `const`, Swift `let`, Dart `final`/`const`)
-- Dead member detection is conservative — annotated, public, generated, dynamically referenced, or otherwise ambiguous declarations are preserved
-- Only single-return-statement methods are inlined (no multi-statement constant-return analysis)
+- Dead member detection is conservative — annotated, generated, dynamically referenced, ambiguous, and open-world public declarations are preserved
+- Only single-return-statement boolean methods are inlined
 - Does not analyse method parameters for side effects
 - Empty class removal requires no cross-file references (enum types are always preserved)
 

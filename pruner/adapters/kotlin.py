@@ -58,6 +58,30 @@ class KotlinAdapter(BaseAdapter):
         raw = content[declaration.start_byte:declaration.end_byte].lstrip()
         return {'final': bool(re.search(rb'\b(?:const\s+)?val\b', raw))}
 
+    def field_reference_names(self, declaration, content: bytes,
+                              name: str) -> frozenset[str]:
+        """Include JVM accessors generated for Kotlin properties.
+
+        Java calls a regular Kotlin ``val property`` through ``getProperty()``
+        (or ``isReady()`` for boolean-style names).  Delegated and extension
+        properties use the same accessor naming.  ``const`` and ``@JvmField``
+        declarations expose a field directly and therefore have no generated
+        accessor to index.
+        """
+        raw = content[declaration.start_byte:declaration.end_byte]
+        names = {name}
+        if re.search(rb'\bconst\s+val\b', raw) or b'@JvmField' in raw:
+            return frozenset(names)
+
+        capitalized = name[:1].upper() + name[1:]
+        names.add('get' + capitalized)
+        if re.match(r'is[A-Z]', name):
+            names.add(name)
+        if re.search(rb'\bvar\b', raw):
+            setter_suffix = name[2:] if re.match(r'is[A-Z]', name) else capitalized
+            names.add('set' + setter_suffix)
+        return frozenset(names)
+
     def simplify_language_expressions(self, content: bytes) -> bytes:
         from ..steps.kotlin_expr import kotlin_if_expr
         return kotlin_if_expr(content)
@@ -77,8 +101,6 @@ class KotlinAdapter(BaseAdapter):
         facts = super().contract_facts(content)
         for match in _TYPE_DECL.finditer(content):
             modifier, kind, name, tail = match.groups()
-            if modifier == 'final':
-                facts['final'].add(name)
             if kind == 'interface' or modifier == 'abstract':
                 facts['contracts'].add(name)
             tail = tail.strip()
@@ -86,8 +108,6 @@ class KotlinAdapter(BaseAdapter):
                 parents = split_type_list(tail[1:])
                 if parents:
                     facts['relations'][name] = set(parents)
-                    if kind != 'interface':
-                        facts['implementors'].add(name)
         for name, body in declared_bodies(content, _INTERFACE_BODY):
             facts['methods'][name] = {m.group(1) for m in _METHOD.finditer(body)}
         for name, body in declared_bodies(content, _ABSTRACT_BODY):

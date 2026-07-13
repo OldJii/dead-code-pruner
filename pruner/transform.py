@@ -76,6 +76,8 @@ def load_config(path: str) -> list[tuple[str, str]]:
             replacements.append((str(pat), str(val)))
     else:
         for key, val in data.items():
+            if key == 'project_boundary':
+                continue
             if isinstance(val, bool):
                 val = 'true' if val else 'false'
             replacements.append((key, str(val)))

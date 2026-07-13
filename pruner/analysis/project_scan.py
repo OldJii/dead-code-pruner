@@ -10,7 +10,6 @@ results in the main process.
 """
 
 import os
-import re
 import time
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -27,6 +26,7 @@ from .ref_index import (
     iter_type_identifiers,
 )
 from .project_layout import ProjectLayout
+from .project_boundary import ProjectBoundary, detect_project_boundary
 from .contracts import ContractGraph
 
 
@@ -101,10 +101,8 @@ class ProjectScanResult:
     __slots__ = (
         'all_files', 'ref_files', 'dead_methods', 'all_methods', 'fields',
         'variant_conflicts', 'ref_index', 'member_ref_index', 'type_ref_index',
-        'dynamic_ref_index',
-        'children_map', 'final_classes', 'iface_abstract',
-        'implements', 'contracts', 'layout', 'elapsed',
-        'content_cache',
+        'dynamic_ref_index', 'contracts', 'layout', 'elapsed',
+        'content_cache', 'boundary',
     )
 
     def __init__(self):
@@ -118,14 +116,11 @@ class ProjectScanResult:
         self.member_ref_index: dict[str, set[str]] = defaultdict(set)
         self.type_ref_index: dict[str, set[str]] = defaultdict(set)
         self.dynamic_ref_index: dict[str, set[str]] = defaultdict(set)
-        self.children_map: dict[str, set[str]] = defaultdict(set)
-        self.final_classes: set[str] = set()
-        self.iface_abstract: set[str] = set()
-        self.implements: set[str] = set()
         self.contracts: ContractGraph = ContractGraph()
         self.layout: ProjectLayout | None = None
         self.elapsed: float = 0.0
         self.content_cache: dict[str, str] = {}
+        self.boundary: ProjectBoundary | None = None
 
     # ── Incremental update ──────────────────────────────────────
 
@@ -178,9 +173,8 @@ class ProjectScanResult:
 
         # Incremental rounds contain far fewer files than the initial scan,
         # but each file still pays full tree-sitter/method/field/contract
-        # analysis cost.  The old 500-file threshold forced typical
-        # Keep medium incremental rounds distributed instead of collapsing
-        # them onto one core.
+        # analysis cost.  Keep medium incremental rounds distributed instead
+        # of collapsing them onto one core.
         n_workers = min(os.cpu_count() or 1,
                         max(1, (len(file_infos) + _INCREMENTAL_FILES_PER_WORKER - 1)
                             // _INCREMENTAL_FILES_PER_WORKER))
@@ -234,7 +228,6 @@ class ProjectScanResult:
             self._update_files_sequential(file_infos, show_progress=True)
 
         self._recompute_variants()
-        self._sync_contract_mirrors()
         dt = time.time() - t0
         ui.info(f"Incremental update: {len(file_infos)} files re-scanned  "
                 f"{ui.dim(ui.fmt_elapsed(dt))}")
@@ -297,15 +290,6 @@ class ProjectScanResult:
             if len(methods) > 1 and (has_source_set_variants or has_non_candidate
                                      or has_multiple_shapes):
                 self.variant_conflicts.add(key)
-
-    def _sync_contract_mirrors(self) -> None:
-        """Keep legacy attribute mirrors in sync with ContractGraph."""
-        g = self.contracts
-        self.children_map = g.children_map
-        self.final_classes = g.final_classes
-        self.iface_abstract = g.iface_abstract
-        self.implements = g.implements
-
 
 # ── Parallel scan helpers ───────────────────────────────────────
 
@@ -443,7 +427,8 @@ _MIN_INCREMENTAL_FILES_FOR_PARALLEL = 25
 _INCREMENTAL_FILES_PER_WORKER = 20
 
 
-def scan_project(root_dir: str, *, progress_interval: int = 500) -> ProjectScanResult:
+def scan_project(root_dir: str, *, progress_interval: int = 500,
+                 boundary: ProjectBoundary | None = None) -> ProjectScanResult:
     """Walk *root_dir* once and collect method scan, fields, reference index,
     and contract graph data in a single pass.
 
@@ -454,6 +439,7 @@ def scan_project(root_dir: str, *, progress_interval: int = 500) -> ProjectScanR
     result = ProjectScanResult()
     layout = ProjectLayout(root_dir)
     result.layout = layout
+    result.boundary = boundary or detect_project_boundary(root_dir, layout=layout)
     ui.kv("Project layout", f"{layout.kind} ({len(layout.modules)} module(s))")
     if len(layout.modules) > 1:
         for mod_name in layout.modules:
@@ -522,12 +508,10 @@ def scan_project(root_dir: str, *, progress_interval: int = 500) -> ProjectScanR
             result.dynamic_ref_index[name].add(fp)
 
     _compute_variant_conflicts(result)
-    result._sync_contract_mirrors()
-
     result.elapsed = time.time() - t0
     dead_count = len(result.dead_methods)
     ui.info(f"Scan complete: {dead_count} dead methods, "
-            f"{len(result.children_map)} class hierarchies  "
+            f"{len(result.contracts.children_map)} class hierarchies  "
             f"{ui.dim(ui.fmt_elapsed(result.elapsed))}")
     return result
 
@@ -541,26 +525,3 @@ def semantic_method_key(method: dict) -> tuple:
         method.get('name'),
         method.get('param_count', 0),
     )
-
-
-def build_identifier_index(all_files: list[str],
-                           content_cache: dict[str, str] | None = None,
-                           ) -> dict[str, set[str]]:
-    """Build ``{identifier: {filepath}}`` for bare name occurrences.
-
-    When *content_cache* is provided, file contents are read from cache
-    instead of disk — avoids a full re-read of the project.
-    """
-    pat = re.compile(r'\b([A-Za-z_][A-Za-z0-9_]{2,})\b')
-    index: dict[str, set[str]] = defaultdict(set)
-    for fp in all_files:
-        content = content_cache.get(fp) if content_cache else None
-        if content is None:
-            try:
-                with open(fp, 'r', encoding='utf-8', errors='ignore') as f:
-                    content = f.read()
-            except Exception:
-                continue
-        for m in pat.finditer(content):
-            index[m.group(1)].add(fp)
-    return index

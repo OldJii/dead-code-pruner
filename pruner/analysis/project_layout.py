@@ -37,6 +37,13 @@ class ProjectLayout:
         assert self._modules is not None
         return [m.name for m in self._modules]
 
+    @property
+    def module_entries(self) -> list[tuple[str, str]]:
+        """Return ``(module name, absolute path)`` pairs for policy analysis."""
+        self._ensure_detected()
+        assert self._modules is not None
+        return [(m.name, m.path) for m in self._modules]
+
     def get_module(self, filepath: str) -> str | None:
         """Return the module name for *filepath*, or ``None`` (single-module)."""
         abs_fp = os.path.abspath(filepath)
@@ -94,13 +101,20 @@ class ProjectLayout:
             return
 
         include_pat = re.compile(
-            r"""include\s*\(?['"](:[\w:.-]+)['"]""")
-        for m in include_pat.finditer(content):
-            mod_path_str = m.group(1)
-            rel = mod_path_str.lstrip(':').replace(':', os.sep)
-            abs_path = os.path.join(self.root, rel)
-            if os.path.isdir(abs_path):
-                self._modules.append(_Module(mod_path_str, abs_path))
+            r'\binclude\s*(?:\((.*?)\)|([^\n]+))', re.S)
+        module_pat = re.compile(r"['\"](:[\w:.-]+)['\"]")
+        seen: set[str] = set()
+        for statement in include_pat.finditer(content):
+            payload = statement.group(1) or statement.group(2) or ''
+            for module in module_pat.finditer(payload):
+                mod_path_str = module.group(1)
+                if mod_path_str in seen:
+                    continue
+                seen.add(mod_path_str)
+                rel = mod_path_str.lstrip(':').replace(':', os.sep)
+                abs_path = os.path.join(self.root, rel)
+                if os.path.isdir(abs_path):
+                    self._modules.append(_Module(mod_path_str, abs_path))
 
         if not self._modules:
             for entry in os.listdir(self.root):
