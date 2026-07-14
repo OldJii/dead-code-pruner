@@ -4,10 +4,10 @@ package com.test;
 class Case19_CascadeTernary {
 
     public void test() {
-        // step5 -> false ? 10 : 20  -> step3 -> 20
+        // standalone inline -> false ? 10 : 20 -> Phase 1 Step 4 -> 20
         int timeout = false ? 10 : 20;
 
-        // step5 -> false ? "old" : "new"  -> step3 -> "new"
+        // standalone inline -> false ? "old" : "new" -> Phase 1 Step 4 -> "new"
         String label = false ? "old" : "new";
 
         // 嵌套三元

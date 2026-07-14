@@ -18,8 +18,8 @@ Examples:
   python -m pruner .                               # full pipeline, auto-find config
   python -m pruner src/ --config pruner.yaml        # explicit config
   python -m pruner . --dry-run                      # scan only, no changes
-  python -m pruner . --phases 1                     # constant folding only
-  python -m pruner . --phases 1,2                   # phase 1+2 only
+  python -m pruner . --phases 1                     # source simplification only
+  python -m pruner . --phases 2                     # project cleanup only
 """,
     )
     ap.add_argument('target', nargs='?', default='.',
@@ -29,7 +29,7 @@ Examples:
     ap.add_argument('--dry-run', action='store_true',
                     help='Scan and report only, do not modify files')
     ap.add_argument('--phases', default=None,
-                    help='Comma-separated phases to run (default: 1,2,3)')
+                    help='Comma-separated phases to run (default: 1,2)')
     ap.add_argument('--world', choices=('auto', 'closed', 'open'), default=None,
                     help='Override project-boundary detection')
 
@@ -49,7 +49,12 @@ Examples:
 
     phases = None
     if args.phases:
-        phases = [int(p.strip()) for p in args.phases.split(',')]
+        try:
+            phases = [int(p.strip()) for p in args.phases.split(',')]
+        except ValueError:
+            ap.error('--phases must contain only 1 and/or 2')
+        if not phases or any(phase not in (1, 2) for phase in phases):
+            ap.error('--phases must contain only 1 and/or 2')
 
     run_full_pipeline(
         target,

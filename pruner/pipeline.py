@@ -1,20 +1,15 @@
-"""Three-phase pipeline orchestrator for the tree-sitter dead-code pruner.
+"""Two-phase pipeline orchestrator for the tree-sitter dead-code pruner.
 
 Pipeline:
-  Phase 1: Constant folding + boolean simplification (iterative convergence)
-      step1 → step2 → step3 → step4, loop until no changes.
+  Phase 1: Source simplification (per-file convergence)
+      Steps 1–8 run in source order until no changes remain.
 
-  Phase 2: Boolean-returning method inlining + cascade simplification
-      step5 → step1-4 cascade, loop until no new inlines.
-
-  Phase 3: Dead method cleanup + cascade simplification
-      step6 → step1-4 cascade, loop until no new dead methods.
+  Phase 2: Project cleanup
+      Step 1 scan → Step 2 clean declarations → Step 3 rerun Phase 1 →
+      Step 4 refresh changed files, until stable → Step 5 remove empty
+      classes and files.
 
   Quality gate: Validate all modified files and report statistics.
-
-When both Phase 2 and Phase 3 are enabled (default), Phase 2 is merged
-into Phase 3 — step6 already handles boolean-method inlining — avoiding
-a redundant full-project scan.
 
 Every phase prints clear progress, per-round stats, and elapsed time
 so the operator always knows what the tool is doing.
@@ -28,9 +23,8 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from .lang import SUPPORTED_EXTS, SKIP_DIRS
 from .transform import load_config, process_file, run_pipeline
-from .steps.method_inline import step5_project
-from .steps.dead_methods import step6_project
-from .steps.empty_cleanup import step7_empty_cleanup
+from .steps.dead_methods import phase2_step2_cleanup_dead_declarations
+from .steps.empty_cleanup import phase2_step5_cleanup_empty_artifacts
 from .validation import count_ast_errors
 from .analysis.project_layout import ProjectLayout
 from .analysis.project_scan import scan_project
@@ -47,7 +41,7 @@ _file_snapshots: dict[str, bytes] = {}
 
 
 def _process_files_worker(args):
-    """Worker for parallel step1-4 processing.
+    """Worker for parallel Phase 1 processing.
 
     Receives ``(file_paths, replacements)``.
     Returns changed file paths and per-file errors.
@@ -122,11 +116,11 @@ def _snapshot_file(filepath: str):
             pass
 
 
-def _run_steps_1_4(target: str, replacements: list, dry_run: bool,
-                    label: str = "Transforming",
-                    file_subset: set[str] | None = None,
-                    track_changed: bool = False):
-    """Run step1-4 on files under *target*, return number of files changed.
+def _run_phase_1_steps(target: str, replacements: list, dry_run: bool,
+                       label: str = "Transforming",
+                       file_subset: set[str] | None = None,
+                       track_changed: bool = False):
+    """Run Phase 1, Steps 1–8 under *target*.
 
     If *file_subset* is provided, only those files are processed (used by
     cascade passes to avoid re-scanning the entire project).
@@ -192,7 +186,7 @@ def _run_steps_1_4(target: str, replacements: list, dry_run: bool,
                         ui.progress(completed, total, label, f"{cnt} changed")
             except Exception as e:
                 ui.progress_done()
-                ui.warn(f"Parallel step1-4 failed ({e}), falling back")
+                ui.warn(f"Parallel Phase 1 failed ({e}), falling back")
                 cnt = 0
                 changed_paths.clear()
                 for idx, fp in enumerate(all_targets):
@@ -233,17 +227,15 @@ def _run_steps_1_4(target: str, replacements: list, dry_run: bool,
 
 
 def run_phase_1(target: str, replacements: list, dry_run: bool) -> tuple[int, float]:
-    ui.banner("Phase 1  Constant Folding + Boolean Simplification")
+    ui.banner("Phase 1  Source Simplification")
     t0 = time.time()
-    ui.round_header(1, "Per-file fixed-point simplification")
-    total = _run_steps_1_4(
+    ui.round_header(1, "Steps 1–8 · Per-file fixed-point simplification")
+    total = _run_phase_1_steps(
         target, replacements, dry_run, "Transforming", track_changed=False)
     ui.success("Phase 1 converged in one project pass; each file reached its fixed point")
     elapsed = time.time() - t0
     return total, elapsed
 
-
-# ── Phase 2 ───────────────────────────────────────────────────
 
 def _snapshot_all_sources(target: str):
     source_files: list[str] = []
@@ -261,56 +253,26 @@ def _snapshot_all_sources(target: str):
         if (idx + 1) % interval == 0 or idx + 1 == total:
             ui.progress(idx + 1, total, "Snapshotting")
     ui.progress_done()
+# ── Phase 2 ───────────────────────────────────────────────────
 
 
-def run_phase_2(target: str, replacements: list, dry_run: bool) -> tuple[int, float]:
-    ui.banner("Phase 2  Boolean Method Inlining")
-    t0 = time.time()
-    total = 0
-    max_rounds = 10
-    for r in range(1, max_rounds + 1):
-        ui.round_header(r, "Boolean method inlining")
-        t_inline = time.time()
-        inline_cnt, modified = step5_project(
-            target, dry_run=dry_run, show_header=False)
-        ui.info(f"Inlined {ui.bold(str(inline_cnt))} items  "
-                f"{ui.dim(ui.fmt_elapsed(time.time() - t_inline))}")
-
-        cascade_cnt = 0
-        if inline_cnt > 0 and not dry_run and modified:
-            cascade_cnt = _run_steps_1_4(
-                target, replacements, dry_run, "cascade",
-                file_subset=modified,
-            )
-
-        total += inline_cnt + cascade_cnt
-        ui.info(f"Round {r}: inline={inline_cnt}, cascade={cascade_cnt}")
-
-        if inline_cnt == 0 or dry_run:
-            ui.success(f"Phase 2 converged after {r} round(s)")
-            break
-    elapsed = time.time() - t0
-    return total, elapsed
-
-
-# ── Phase 3 ───────────────────────────────────────────────────
-
-def run_phase_3(target: str, replacements: list, dry_run: bool, *,
+def run_phase_2(target: str, replacements: list, dry_run: bool, *,
                 boundary: ProjectBoundary | None = None) -> tuple[int, float]:
-    ui.banner("Phase 3  Dead Method Cleanup")
+    ui.banner("Phase 2  Project Cleanup")
     t0 = time.time()
     total = 0
     max_rounds = 10
 
     # One unified scan for ALL rounds — subsequent rounds update
     # incrementally instead of re-scanning the full project.
+    ui.info("Step 1 · Unified project scan")
     scan = scan_project(
         target, progress_interval=500, boundary=boundary)
 
     for r in range(1, max_rounds + 1):
-        ui.round_header(r, "Dead declaration cleanup")
+        ui.round_header(r, "Step 2 · Dead declaration cleanup")
         t_dead = time.time()
-        dead_cnt, modified = step6_project(
+        dead_cnt, modified = phase2_step2_cleanup_dead_declarations(
             target, dry_run=dry_run, scan=scan, show_header=False,
             boundary=boundary)
         ui.info(f"Cleaned {ui.bold(str(dead_cnt))} items  "
@@ -319,8 +281,9 @@ def run_phase_3(target: str, replacements: list, dry_run: bool, *,
         all_round_modified = set(modified) if modified else set()
         cascade_cnt = 0
         if dead_cnt > 0 and not dry_run and modified:
-            result = _run_steps_1_4(
-                target, replacements, dry_run, "cascade",
+            result = _run_phase_1_steps(
+                target, replacements, dry_run,
+                "Step 3 · Phase 1 cascade",
                 file_subset=modified,
                 track_changed=True,
             )
@@ -334,13 +297,19 @@ def run_phase_3(target: str, replacements: list, dry_run: bool, *,
         ui.info(f"Round {r}: dead={dead_cnt}, cascade={cascade_cnt}")
 
         if dead_cnt == 0 or dry_run:
-            ui.success(f"Phase 3 converged after {r} round(s)")
+            ui.success(f"Phase 2 converged after {r} round(s)")
             break
 
         # Incremental update: only re-scan files that were actually modified
         # in this round, instead of re-scanning all 19K+ files.
         if all_round_modified and r < max_rounds:
+            ui.info("Step 4 · Refresh changed files in project scan")
             scan.update_files(all_round_modified)
+
+    ui.info("Step 5 · Empty class and file cleanup")
+    cleanup = phase2_step5_cleanup_empty_artifacts(
+        target, dry_run=dry_run, show_header=False, boundary=boundary)
+    total += cleanup['classes_removed'] + cleanup['files_deleted']
 
     elapsed = time.time() - t0
     return total, elapsed
@@ -415,10 +384,14 @@ def run_full_pipeline(
         ui.kv("Phases", str(phases))
 
     if phases is None:
-        phases = [1, 2, 3]
+        phases = [1, 2]
+    invalid_phases = sorted(set(phases) - {1, 2})
+    if invalid_phases:
+        raise ValueError(
+            f"unsupported phase(s): {invalid_phases}; expected 1 and/or 2")
 
     # Single snapshot pass for all phases — avoids repeated full reads.
-    if not dry_run and (2 in phases or 3 in phases) and os.path.isdir(target):
+    if not dry_run and 2 in phases and os.path.isdir(target):
         _snapshot_all_sources(target)
 
     results = {}
@@ -429,35 +402,15 @@ def run_full_pipeline(
         results['phase_1'] = {'changes': cnt, 'elapsed': elapsed}
         grand_total += cnt
 
-    # When both Phase 2 and Phase 3 are enabled, skip Phase 2 — step6
-    # (Phase 3) already handles boolean-method inlining, void-call
-    # removal, and definition deletion.  This saves one full project scan.
-    phase2_merged = 2 in phases and 3 in phases
-    if 2 in phases and not phase2_merged and os.path.isdir(target):
-        cnt, elapsed = run_phase_2(target, replacements, dry_run)
-        results['phase_2'] = {'changes': cnt, 'elapsed': elapsed}
-        grand_total += cnt
-
     pre_rollback_count = 0
     if not dry_run and grand_total > 0:
         pre_rollback_count = _run_quality_gate_rollback(target)
 
-    if 3 in phases and os.path.isdir(target):
-        cnt, elapsed = run_phase_3(
+    if 2 in phases and os.path.isdir(target):
+        cnt, elapsed = run_phase_2(
             target, replacements, dry_run, boundary=boundary)
-        results['phase_3'] = {'changes': cnt, 'elapsed': elapsed}
+        results['phase_2'] = {'changes': cnt, 'elapsed': elapsed}
         grand_total += cnt
-
-        t_cleanup = time.time()
-        cleanup = step7_empty_cleanup(
-            target, dry_run=dry_run, show_header=False, boundary=boundary)
-        cleanup_cnt = cleanup['classes_removed'] + cleanup['files_deleted']
-        if cleanup_cnt > 0:
-            results['cleanup'] = {
-                'changes': cleanup_cnt,
-                'elapsed': time.time() - t_cleanup,
-            }
-            grand_total += cleanup_cnt
 
     total_elapsed = time.time() - pipeline_start
 

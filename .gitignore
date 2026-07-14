@@ -4,6 +4,7 @@ __pycache__/
 pruner.yaml
 pruner.yml
 pruner.json
+!tests/pruner.yaml
 .idea/
 .vscode/
 tests/**/work/

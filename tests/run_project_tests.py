@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Project-level test runner for Step 5 (inline boolean methods) and Step 6 (dead method cleanup).
-Copies input/ to work/, runs the corresponding step, diffs with expected/.
+Project-level tests for Phase 2 and the standalone boolean-inline utility.
+Copies input/ to work/, runs the corresponding operation, and diffs with
+expected/.
 """
 import os
 import sys
@@ -12,9 +13,9 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(SCRIPT_DIR)
 sys.path.insert(0, PROJECT_DIR)
 
-from pruner.steps.method_inline import step5_project  # noqa: E402
-from pruner.steps.dead_methods import step6_project    # noqa: E402
-from pruner.steps.empty_cleanup import step7_empty_cleanup  # noqa: E402
+from pruner.steps.method_inline import inline_boolean_methods_standalone  # noqa: E402
+from pruner.steps.dead_methods import phase2_step2_cleanup_dead_declarations  # noqa: E402
+from pruner.steps.empty_cleanup import phase2_step5_cleanup_empty_artifacts  # noqa: E402
 from pruner.pipeline import run_full_pipeline           # noqa: E402
 
 
@@ -101,42 +102,58 @@ def main():
 
     results = []
 
-    step5_dir = os.path.join(SCRIPT_DIR, 'step5_dir')
-    results.append(run_dir_test('step5_inline', step5_dir, step5_project))
-
-    step6_basic = os.path.join(SCRIPT_DIR, 'step6_basic')
+    standalone_inline_fixture = os.path.join(
+        SCRIPT_DIR, 'standalone_boolean_inline')
     results.append(run_dir_test(
-        'step6_basic', step6_basic,
-        lambda root: step6_project(root, world='closed')))
+        'standalone_inline', standalone_inline_fixture,
+        inline_boolean_methods_standalone))
 
-    step6_enhanced = os.path.join(SCRIPT_DIR, 'step6_enhanced')
+    project_cleanup_basic_fixture = os.path.join(
+        SCRIPT_DIR, 'project_cleanup_basic')
     results.append(run_dir_test(
-        'step6_enhanced', step6_enhanced,
-        lambda root: step6_project(root, world='closed')))
+        'project_cleanup_basic', project_cleanup_basic_fixture,
+        lambda root: phase2_step2_cleanup_dead_declarations(
+            root, world='closed')))
 
-    short_names = os.path.join(SCRIPT_DIR, 'step6_short_names')
+    project_cleanup_enhanced_fixture = os.path.join(
+        SCRIPT_DIR, 'project_cleanup_enhanced')
     results.append(run_dir_test(
-        'step6_short_names', short_names,
-        lambda root: step6_project(root, world='closed')))
+        'project_cleanup_enhanced', project_cleanup_enhanced_fixture,
+        lambda root: phase2_step2_cleanup_dead_declarations(
+            root, world='closed')))
 
-    metadata_refs = os.path.join(SCRIPT_DIR, 'step6_metadata_refs')
+    short_names = os.path.join(SCRIPT_DIR, 'project_cleanup_short_names')
     results.append(run_dir_test(
-        'step6_metadata_refs', metadata_refs,
-        lambda root: step6_project(root, world='closed')))
+        'project_cleanup_short_names', short_names,
+        lambda root: phase2_step2_cleanup_dead_declarations(
+            root, world='closed')))
 
-    receiver_refs = os.path.join(SCRIPT_DIR, 'step6_receiver_refs')
+    metadata_refs = os.path.join(
+        SCRIPT_DIR, 'project_cleanup_metadata_refs')
     results.append(run_dir_test(
-        'step6_receiver_refs', receiver_refs,
-        lambda root: step6_project(root, world='closed')))
+        'project_cleanup_metadata_refs', metadata_refs,
+        lambda root: phase2_step2_cleanup_dead_declarations(
+            root, world='closed')))
 
-    kotlin_trailing = os.path.join(SCRIPT_DIR, 'step6_kotlin_trailing_lambda')
+    receiver_refs = os.path.join(
+        SCRIPT_DIR, 'project_cleanup_receiver_refs')
     results.append(run_dir_test(
-        'step6_kotlin_lambda', kotlin_trailing, step6_project))
+        'project_cleanup_receiver_refs', receiver_refs,
+        lambda root: phase2_step2_cleanup_dead_declarations(
+            root, world='closed')))
 
-    manifest_entry = os.path.join(SCRIPT_DIR, 'step7_manifest_entry')
+    kotlin_trailing = os.path.join(
+        SCRIPT_DIR, 'project_cleanup_kotlin_trailing_lambda')
     results.append(run_dir_test(
-        'step7_manifest_entry', manifest_entry,
-        lambda root: step7_empty_cleanup(root, world='closed')))
+        'project_cleanup_kotlin_lambda', kotlin_trailing,
+        phase2_step2_cleanup_dead_declarations))
+
+    empty_cleanup_manifest_fixture = os.path.join(
+        SCRIPT_DIR, 'project_cleanup_empty_manifest')
+    results.append(run_dir_test(
+        'empty_cleanup_manifest_entry', empty_cleanup_manifest_fixture,
+        lambda root: phase2_step5_cleanup_empty_artifacts(
+            root, world='closed')))
 
     full_pipeline = os.path.join(SCRIPT_DIR, 'full_pipeline_semantic')
     results.append(run_full_pipeline_test('full_pipeline', full_pipeline))

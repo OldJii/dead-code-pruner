@@ -1,4 +1,4 @@
-"""Step 5 — inline boolean-returning private/static methods.
+"""Standalone utility for boolean-returning method inlining.
 
 Scans the entire project for zero-arg methods that return a boolean
 constant, replaces all call sites with the literal value, and deletes
@@ -27,8 +27,12 @@ from ..analysis.code_edit import (
 from ..validation import validate_transformation
 
 
-def step5_project(root_dir: str, dry_run: bool = False, *,
-                  show_header: bool = True) -> tuple[int, set[str]]:
+def inline_boolean_methods_standalone(
+    root_dir: str,
+    dry_run: bool = False,
+    *,
+    show_header: bool = True,
+) -> tuple[int, set[str]]:
     """Inline boolean constant methods project-wide.
 
     Returns ``(total_inlined, modified_files)``."""

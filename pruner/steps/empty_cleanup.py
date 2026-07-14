@@ -1,4 +1,4 @@
-"""Step 7 — remove empty class declarations and empty files.
+"""Phase 2, Step 5 — remove empty class declarations and empty files.
 
 After dead-method removal, some classes may end up with no remaining
 members.  This step detects those empty classes, verifies they are not
@@ -164,10 +164,14 @@ def _file_has_only_imports(content: str) -> bool:
     return True
 
 
-def step7_empty_cleanup(root_dir: str, dry_run: bool = False, *,
-                        show_header: bool = True,
-                        boundary: ProjectBoundary | None = None,
-                        world: str = 'auto') -> dict:
+def phase2_step5_cleanup_empty_artifacts(
+    root_dir: str,
+    dry_run: bool = False,
+    *,
+    show_header: bool = True,
+    boundary: ProjectBoundary | None = None,
+    world: str = 'auto',
+) -> dict:
     """Remove empty classes and delete empty files.
 
     Returns ``{'classes_removed': int, 'files_deleted': int}``.

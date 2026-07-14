@@ -82,9 +82,10 @@ class KotlinAdapter(BaseAdapter):
             names.add('set' + setter_suffix)
         return frozenset(names)
 
-    def simplify_language_expressions(self, content: bytes) -> bytes:
-        from ..steps.kotlin_expr import kotlin_if_expr
-        return kotlin_if_expr(content)
+    def phase1_step5_simplify_language_expressions(
+            self, content: bytes) -> bytes:
+        from ..steps.kotlin_expr import phase1_step5_simplify_kotlin_expressions
+        return phase1_step5_simplify_kotlin_expressions(content)
 
     def parameter_count(self, declaration, content: bytes) -> int | None:
         for child in declaration.children:

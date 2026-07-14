@@ -1,4 +1,4 @@
-"""Step 6 — dead declaration detection and cleanup.
+"""Phase 2, Step 2 — dead declaration detection and cleanup.
 
 Pipeline:
   1. Unified scan: methods + fields + reference index + contract graph.
@@ -43,7 +43,7 @@ _SIMPLIFY_FILES_PER_WORKER = 40
 
 
 def _simplify_files_worker(file_paths):
-    """Worker: run step1b-4 simplification on a batch of files."""
+    """Worker: run the Phase 1 simplification loop on a batch of files."""
     from ..transform import run_pipeline
 
     errors: list[tuple[str, str]] = []
@@ -108,12 +108,15 @@ def _method_key(method: dict) -> tuple:
     )
 
 
-def step6_project(root_dir: str, dry_run: bool = False,
-                  *, scan: ProjectScanResult | None = None,
-                  show_header: bool = True,
-                  boundary: ProjectBoundary | None = None,
-                  world: str = 'auto',
-                  ) -> tuple[int, set[str]]:
+def phase2_step2_cleanup_dead_declarations(
+    root_dir: str,
+    dry_run: bool = False,
+    *,
+    scan: ProjectScanResult | None = None,
+    show_header: bool = True,
+    boundary: ProjectBoundary | None = None,
+    world: str = 'auto',
+) -> tuple[int, set[str]]:
     """Run full dead-declaration cleanup on *root_dir*.
 
     When *scan* is provided, skip the expensive full-project scan and use

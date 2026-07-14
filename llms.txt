@@ -2,7 +2,7 @@
 
 > Conservative multi-language dead-code elimination for feature-flag cleanup, boolean constant folding, and static-analysis-driven source cleanup.
 
-dead-code-pruner uses tree-sitter to replace permanently true/false feature flags with literals, simplify boolean expressions, eliminate dead if-branches, inline boolean-return methods, and remove provably-unused methods and fields in a 3-phase iterative pipeline until convergence. It targets dead code cleanup for Java, Kotlin (Android / JVM server), Go server, Swift iOS, and Dart/Flutter projects while preserving dynamic framework entry points.
+dead-code-pruner uses tree-sitter to replace permanently true/false feature flags with literals, simplify boolean expressions, eliminate dead if-branches, inline boolean-return methods, and remove provably-unused methods and fields in a two-phase iterative pipeline until convergence. It targets dead code cleanup for Java, Kotlin (Android / JVM server), Go server, Swift iOS, and Dart/Flutter projects while preserving dynamic framework entry points.
 
 ## Documentation
 
@@ -11,9 +11,10 @@ dead-code-pruner uses tree-sitter to replace permanently true/false feature flag
 
 ## Pipeline
 
-**Phase 1** — Constant folding + local propagation + boolean simplification + unreachable code removal (steps 1–4, loops until stable)
-**Phase 2** — Boolean-return method inlining + cascade simplification
-**Phase 3** — Dead method and unused field cleanup + cascade simplification + empty class/file removal
+**Phase 1 — Source Simplification** — Steps 1–8 run in execution order and loop until stable.
+**Phase 2 — Project Cleanup** — Step 1 scan the project; Step 2 clean dead declarations and fields (including boolean-method inlining); Step 3 rerun Phase 1; Step 4 refresh changed files; Step 5 remove unreferenced empty classes and files.
+
+Boolean-method inlining also remains available as a standalone utility for focused tests and custom integrations, but it is not a pipeline phase.
 
 ## Quick start
 

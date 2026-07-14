@@ -1,4 +1,4 @@
-"""Step 1 — constant replacement + local constant propagation.
+"""Phase 1, Steps 1–2 and 8 — constant and local-variable handling.
 
 Replaces occurrences of configured identifiers (e.g. ``AppConfig.IS_DEBUG``)
 with their literal values, skipping comments, strings, and declaration sites.
@@ -117,7 +117,8 @@ def _replace_skip_decl(chunk: bytes, pattern: bytes, replacement: bytes) -> byte
     return out
 
 
-def step1_replace(cb: bytes, replacements: list, ext: str = '.java') -> bytes:
+def phase1_step1_replace_constants(
+        cb: bytes, replacements: list, ext: str = '.java') -> bytes:
     """Replace configured constants, skipping comments and strings."""
     if not replacements:
         return cb
@@ -160,7 +161,7 @@ def _replace_configured_chunk(cb: bytes, replacements: list) -> bytes:
     return cb
 
 
-# ── Step 1b: local constant propagation ──────────────────────
+# ── Phase 1, Step 2: local constant propagation ──────────────
 
 def _find_enclosing_scope(cb: bytes, pos: int, ext: str,
                           code: bytes | None = None) -> tuple[int, int]:
@@ -225,7 +226,8 @@ def _extract_scoped_bool_constants(
     return results
 
 
-def step1b_propagate_locals(cb: bytes, ext: str = '.java') -> bytes:
+def phase1_step2_propagate_local_constants(
+        cb: bytes, ext: str = '.java') -> bytes:
     """Propagate locally-declared immutable boolean constants to their uses.
 
     Detects patterns like ``final boolean isPrimary = false;`` or
@@ -251,9 +253,10 @@ def step1b_propagate_locals(cb: bytes, ext: str = '.java') -> bytes:
     return cb
 
 
-# ── Step 1c: unused local variable cleanup ───────────────────
+# ── Phase 1, Step 8: unused local variable cleanup ───────────
 
-def step1c_remove_unused_bool_vars(cb: bytes, ext: str = '.java') -> bytes:
+def phase1_step8_remove_unused_bool_vars(
+        cb: bytes, ext: str = '.java') -> bytes:
     """Remove declarations of boolean variables whose names no longer appear
     within the same enclosing scope."""
     adapter = get_adapter(ext)

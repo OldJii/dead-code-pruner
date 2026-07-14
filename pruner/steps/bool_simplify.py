@@ -1,4 +1,4 @@
-"""Step 2 — simple boolean simplification.
+"""Phase 1, Step 3 — simple boolean simplification.
 
 Resolves trivial boolean expressions:
   - ``!true`` → ``false``
@@ -9,7 +9,7 @@ Resolves trivial boolean expressions:
 from ..ast_utils import parse, txt, find_all, is_bool, replace_node
 
 
-def step2_simple(cb: bytes) -> bytes:
+def phase1_step3_simplify_booleans(cb: bytes) -> bytes:
     for _ in range(200):
         root, cb = parse(cb)
         mod = False

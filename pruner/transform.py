@@ -1,4 +1,4 @@
-"""Single-file transformation pipeline (steps 1–4).
+"""Phase 1 single-file transformation pipeline (Steps 1–8).
 
 Applies constant folding, boolean simplification, compound boolean /
 ternary resolution, and dead-branch elimination to a single file in a
@@ -11,19 +11,21 @@ import yaml
 from . import lang as _lang
 from . import ui
 from .steps.constant_fold import (
-    step1_replace, step1b_propagate_locals, step1c_remove_unused_bool_vars,
+    phase1_step1_replace_constants,
+    phase1_step2_propagate_local_constants,
+    phase1_step8_remove_unused_bool_vars,
 )
-from .steps.bool_simplify import step2_simple
-from .steps.compound_bool import step3_compound
-from .steps.if_blocks import step4_if_blocks
-from .steps.unreachable import step1d_remove_unreachable
+from .steps.bool_simplify import phase1_step3_simplify_booleans
+from .steps.compound_bool import phase1_step4_simplify_compound_expressions
+from .steps.if_blocks import phase1_step6_eliminate_dead_branches
+from .steps.unreachable import phase1_step7_remove_unreachable_code
 from .adapters import get_adapter
 from .validation import validate_transformation
 
 
 def run_pipeline(cb: bytes, replacements=None, *, ext: str = '.java',
                  max_rounds: int = 10) -> bytes:
-    """Run steps 1–4 in a convergence loop until no further changes occur."""
+    """Run Phase 1, Steps 1–8 until no further changes occur."""
     _lang._current_ext = ext
     if replacements is None:
         replacements = []
@@ -32,16 +34,16 @@ def run_pipeline(cb: bytes, replacements=None, *, ext: str = '.java',
     for _ in range(max_rounds):
         prev = cb
         if replacements:
-            cb = step1_replace(cb, replacements, ext)
-        cb = step1b_propagate_locals(cb, ext)
-        cb = step2_simple(cb)
-        cb = step3_compound(cb)
+            cb = phase1_step1_replace_constants(cb, replacements, ext)
+        cb = phase1_step2_propagate_local_constants(cb, ext)
+        cb = phase1_step3_simplify_booleans(cb)
+        cb = phase1_step4_simplify_compound_expressions(cb)
         if adapter:
-            cb = adapter.simplify_language_expressions(cb)
-        cb = step4_if_blocks(
+            cb = adapter.phase1_step5_simplify_language_expressions(cb)
+        cb = phase1_step6_eliminate_dead_branches(
             cb, adapter.preserve_branch_scope if adapter else True)
-        cb = step1d_remove_unreachable(cb)
-        cb = step1c_remove_unused_bool_vars(cb, ext)
+        cb = phase1_step7_remove_unreachable_code(cb)
+        cb = phase1_step8_remove_unused_bool_vars(cb, ext)
         if cb == prev:
             break
     return validate_transformation(original, cb, ext)

@@ -16,9 +16,12 @@ sys.path.insert(0, PROJECT_DIR)
 from pruner.analysis.method_scanner import scan_method_definitions
 from pruner.analysis.project_scan import scan_project
 from pruner.pipeline import run_full_pipeline
-from pruner.steps.constant_fold import step1_replace
-from pruner.steps.dead_methods import _batch_same_file_refs, step6_project
-from pruner.steps.method_inline import step5_project
+from pruner.steps.constant_fold import phase1_step1_replace_constants
+from pruner.steps.dead_methods import (
+    _batch_same_file_refs,
+    phase2_step2_cleanup_dead_declarations,
+)
+from pruner.steps.method_inline import inline_boolean_methods_standalone
 
 
 SCANNER_CASES = {
@@ -124,7 +127,8 @@ class LanguageParityTests(unittest.TestCase):
     def test_replacement_skips_each_language_string_form(self):
         for ext, source in STRING_CASES.items():
             with self.subTest(ext=ext):
-                actual = step1_replace(source, [('FLAG', 'false')], ext)
+                actual = phase1_step1_replace_constants(
+                    source, [('FLAG', 'false')], ext)
                 self.assertIn(b'false', actual)
                 self.assertEqual(1, actual.count(b'FLAG'))
 
@@ -136,7 +140,7 @@ class LanguageParityTests(unittest.TestCase):
                     if isinstance(content, str):
                         (root / name).write_text(content, encoding='utf-8')
                 with contextlib.redirect_stdout(io.StringIO()):
-                    step6_project(str(root))
+                    phase2_step2_cleanup_dead_declarations(str(root))
                 combined = '\n'.join(
                     path.read_text(encoding='utf-8')
                     for path in root.iterdir() if path.is_file())
@@ -210,13 +214,15 @@ class LanguageParityTests(unittest.TestCase):
             '  public static void consume(String value) {}\n'
             '}\n')
 
-        for cleanup in (step5_project, step6_project):
+        for cleanup in (
+                inline_boolean_methods_standalone,
+                phase2_step2_cleanup_dead_declarations):
             with self.subTest(cleanup=cleanup.__name__), \
                     tempfile.TemporaryDirectory() as tmp:
                 source = Path(tmp) / 'PageDescriptor.java'
                 source.write_text(source_text, encoding='utf-8')
                 with contextlib.redirect_stdout(io.StringIO()):
-                    if cleanup is step6_project:
+                    if cleanup is phase2_step2_cleanup_dead_declarations:
                         cleanup(tmp, world='open')
                     else:
                         cleanup(tmp)
@@ -224,7 +230,7 @@ class LanguageParityTests(unittest.TestCase):
                 self.assertIn('getPageId()', content)
                 self.assertIn('consume(getPageId())', content)
                 self.assertNotIn('consume("page_offline")', content)
-                if cleanup is step6_project:
+                if cleanup is phase2_step2_cleanup_dead_declarations:
                     self.assertNotIn('orphanLabel()', content)
                     self.assertNotIn('retired()', content)
 

@@ -1,19 +1,29 @@
 """Transformation steps — each module handles one pruning pass."""
 
-from .constant_fold import step1_replace, step1b_propagate_locals, step1c_remove_unused_bool_vars
-from .bool_simplify import step2_simple
-from .compound_bool import step3_compound
-from .if_blocks import step4_if_blocks
-from .unreachable import step1d_remove_unreachable
-from .kotlin_expr import kotlin_if_expr
-from .method_inline import step5_project
-from .dead_methods import step6_project
-from .empty_cleanup import step7_empty_cleanup
+from .constant_fold import (
+    phase1_step1_replace_constants,
+    phase1_step2_propagate_local_constants,
+    phase1_step8_remove_unused_bool_vars,
+)
+from .bool_simplify import phase1_step3_simplify_booleans
+from .compound_bool import phase1_step4_simplify_compound_expressions
+from .if_blocks import phase1_step6_eliminate_dead_branches
+from .unreachable import phase1_step7_remove_unreachable_code
+from .kotlin_expr import phase1_step5_simplify_kotlin_expressions
+from .method_inline import inline_boolean_methods_standalone
+from .dead_methods import phase2_step2_cleanup_dead_declarations
+from .empty_cleanup import phase2_step5_cleanup_empty_artifacts
 
 __all__ = [
-    'step1_replace', 'step1b_propagate_locals', 'step1c_remove_unused_bool_vars',
-    'step1d_remove_unreachable',
-    'step2_simple', 'step3_compound',
-    'step4_if_blocks', 'kotlin_if_expr',
-    'step5_project', 'step6_project', 'step7_empty_cleanup',
+    'phase1_step1_replace_constants',
+    'phase1_step2_propagate_local_constants',
+    'phase1_step3_simplify_booleans',
+    'phase1_step4_simplify_compound_expressions',
+    'phase1_step6_eliminate_dead_branches',
+    'phase1_step7_remove_unreachable_code',
+    'phase1_step8_remove_unused_bool_vars',
+    'phase1_step5_simplify_kotlin_expressions',
+    'inline_boolean_methods_standalone',
+    'phase2_step2_cleanup_dead_declarations',
+    'phase2_step5_cleanup_empty_artifacts',
 ]

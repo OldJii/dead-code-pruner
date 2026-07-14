@@ -1,0 +1,5 @@
+replacements:
+  - pattern: "BuildConfig.IS_PRODUCTION"
+    value: true
+  - pattern: "FEATURE_FLAG"
+    value: true

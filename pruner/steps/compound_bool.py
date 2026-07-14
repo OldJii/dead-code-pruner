@@ -1,4 +1,4 @@
-"""Step 3 — compound boolean + ternary simplification.
+"""Phase 1, Step 4 — compound boolean + ternary simplification.
 
 Resolves:
   - ``true && expr`` → ``expr``
@@ -79,7 +79,7 @@ def _is_cmp_child(node, cb):
     return False
 
 
-def step3_compound(cb: bytes) -> bytes:
+def phase1_step4_simplify_compound_expressions(cb: bytes) -> bytes:
     for _ in range(500):
         root, cb = parse(cb)
         mod = False

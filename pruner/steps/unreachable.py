@@ -1,4 +1,4 @@
-"""Step 1d — remove unreachable code after unconditional exits.
+"""Phase 1, Step 7 — remove unreachable code after unconditional exits.
 
 Scans every block (method body, if-body, loop body, …) for statements
 that follow an unconditional exit and removes them.  An "unconditional
@@ -187,7 +187,7 @@ def _remove_ranges(cb: bytes, ranges: list[tuple[int, int]]) -> bytes:
     return b'\n'.join(cleaned)
 
 
-def step1d_remove_unreachable(cb: bytes) -> bytes:
+def phase1_step7_remove_unreachable_code(cb: bytes) -> bytes:
     """Remove unreachable code after return/throw/break/continue.
 
     Iterates until no more unreachable code is found (handles cascading

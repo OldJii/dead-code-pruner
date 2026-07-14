@@ -1,6 +1,6 @@
 package com.test;
 
-// Case 18: if/else if/else 链 — step5 内联后 step4 应简化
+// Case 18: if/else if/else 链 — standalone 内联后 Phase 1 Step 6 应简化
 class Case18_CascadeIfElseChain {
 
     public void render() {

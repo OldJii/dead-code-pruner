@@ -3,6 +3,9 @@
 Public API::
 
     from pruner.transform import load_config, process_file, run_pipeline
-    from pruner.steps import step5_project, step6_project
+    from pruner.steps import (
+        inline_boolean_methods_standalone,
+        phase2_step2_cleanup_dead_declarations,
+    )
     from pruner.pipeline import run_full_pipeline
 """

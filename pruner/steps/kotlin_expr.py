@@ -5,7 +5,8 @@ Kotlin if-expressions such as::
     return if (true) { body } else EXPR
     val x = if (false) "A" else "B"
 
-are resolved in a dedicated text pre-pass before AST-based step 4 runs.
+are resolved in the Phase 1 Step 5 language-specific pre-pass before
+Step 6 dead-branch elimination runs.
 """
 
 import re
@@ -97,7 +98,7 @@ def _parse_expr_end(code, pos):
     return code[pos:i].strip(), i
 
 
-def kotlin_if_expr(cb: bytes) -> bytes:
+def phase1_step5_simplify_kotlin_expressions(cb: bytes) -> bytes:
     """Resolve Kotlin if-expressions with constant conditions."""
     code = cb.decode('utf-8', errors='replace')
     pat1 = re.compile(r'(return\s+)if\s*\(\s*(true|false)\s*\)\s*\{')

@@ -43,11 +43,11 @@ class ProgressFormattingTest(unittest.TestCase):
     def test_pipeline_hierarchy_is_phase_round_stage(self):
         output = io.StringIO()
         with redirect_stdout(output):
-            ui.banner('Phase 3  Dead Declaration Cleanup')
+            ui.banner('Phase 2  Project Cleanup')
             ui.round_header(2, 'Project convergence')
             ui.stage('Deleting definitions')
         rendered = output.getvalue()
-        self.assertLess(rendered.index('Phase 3'), rendered.index('Round 2'))
+        self.assertLess(rendered.index('Phase 2'), rendered.index('Round 2'))
         self.assertLess(rendered.index('Round 2'), rendered.index('Stage ·'))
 
 

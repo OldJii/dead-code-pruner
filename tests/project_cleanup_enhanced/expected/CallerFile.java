@@ -9,7 +9,7 @@ public class CallerFile {
   private ParentClass parent = new ChildOverrideSame();
 
   public void process() {
-    // isFeatureOn() -> false → if(false) 应被后续 step2-4 简化
+    // isFeatureOn() -> false → if(false) 应被后续 Phase 1 Steps 3–6 简化
     if (helper.isFeatureOn()) {
       System.out.println("should be removed by cascade");
     }

@@ -89,7 +89,8 @@ class BaseAdapter(ABC):
         """Regexes for immutable local booleans, with name/value groups."""
         return ()
 
-    def simplify_language_expressions(self, content: bytes) -> bytes:
+    def phase1_step5_simplify_language_expressions(
+            self, content: bytes) -> bytes:
         """Apply syntax unique to this language before branch elimination."""
         return content
 

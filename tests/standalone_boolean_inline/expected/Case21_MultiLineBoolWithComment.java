@@ -1,6 +1,6 @@
 package com.test;
 
-// Case 21: 多行布尔表达式中 && false 前有注释行 — step5 内联后 run_all 应正确处理
+// Case 21: 多行布尔表达式中 && false 前有注释行 — standalone 内联后 Phase 1 应正确处理
 class Case21 {
 
     public void test1() {

@@ -1,323 +1,105 @@
 # dead-code-pruner
 
-Conservative multi-language dead-code elimination powered by tree-sitter.
+`dead-code-pruner` is a conservative source-level dead-code cleanup tool powered by [tree-sitter](https://tree-sitter.github.io/).
 
-dead-code-pruner is a static analysis and source cleanup tool for removing dead code after feature flag cleanup, boolean constant folding, and compile-time configuration changes. Give it a constant mapping and it folds configured flags, simplifies boolean/control-flow expressions, eliminates dead branches, inlines boolean-returning methods, removes provably-unused methods and fields, and protects dynamic framework entry points through iterative project-level analysis.
+Give it a set of expressions that are permanently `true` or `false`. It propagates those facts through the source tree, simplifies the resulting control flow, and removes declarations and files that become provably unused.
 
-Built on [tree-sitter](https://tree-sitter.github.io/) for format-agnostic, comment-safe, multi-language analysis.
+The tool currently understands Java, Kotlin, Go, Swift, and Dart. It is designed for Android, JVM services, Go services, iOS, and Flutter repositories, including multi-module projects.
 
-Keywords: dead code elimination, dead code cleanup, static analysis, tree-sitter, feature flag cleanup, boolean simplification, constant folding, Java dead code, Kotlin dead code, Android dead code cleanup, Go dead code, Swift dead code, iOS dead code, Dart dead code, Flutter dead code, refactoring automation.
+## What It Can Clean
 
-## The Problem
+Starting from configured constants, the tool can produce source changes such as:
 
-Projects accumulate boolean feature flags (`AppConfig.IS_DEBUG`, `FeatureFlags.LEGACY_MODE`, compile-time constants, etc.). When a flag becomes permanently `true` or `false`, the guarded code is dead — but cleaning it manually across thousands of files is tedious and error-prone.
+- Replace retired feature flags and compile-time conditions with boolean literals.
+- Simplify boolean expressions, negations, equality checks, short-circuit expressions, ternaries, and language-specific conditional expressions.
+- Remove dead `if` branches and code that becomes unreachable after `return`, `throw`, `break`, or `continue`.
+- Propagate immutable local booleans and remove their declarations after all uses disappear.
+- Inline zero-argument methods that always return `true` or `false`, then continue cleaning the newly exposed branches.
+- Remove empty methods, unused constant-return helpers, and their safe call sites.
+- Remove unused immutable fields when project-wide references and project-boundary rules prove that deletion is safe.
+- Remove unreferenced empty classes and source files left with no declarations.
+- Repeat cascading cleanup until no further source changes can be derived.
 
-## What It Does
+For example, a feature flag and the helpers that only support its retired path can collapse into a single live statement:
 
-```yaml
-# pruner.yaml
-replacements:
-  - pattern: "AppConfig.IS_DEBUG"
-    value: false
+```diff
+- if (FeatureFlags.LEGACY_MODE) {
+-     showLegacyFeature();
+- } else if (isLegacyMode()) {
+-     showLegacyFallback();
+- } else {
+-     showCurrentFeature();
+- }
+-
+- private boolean isLegacyMode() {
+-     return false;
+- }
++ showCurrentFeature();
 ```
 
-The tool runs a **3-phase + cleanup pipeline**. Per-file work reaches a fixed point internally; project-level cleanup then iterates only over files changed by the previous round:
+The cleanup is intentionally conservative. Annotated declarations, framework entry points, contracts, overrides, dynamic references, and public APIs that may be used outside the scanned repository are preserved unless the tool can prove they are safe to remove.
 
-| Phase | Steps | Purpose |
-|-------|-------|---------|
-| **1** | Constant fold → local propagation → bool simplify → compound bool → if-block eliminate → unreachable removal → unused var cleanup | One project pass; every file converges internally |
-| **2** | Boolean-return method inlining → cascade simplify | Available as an isolated phase; merged into Phase 3 in the default full run |
-| **3** | Unified scan → project-boundary-aware method/field cleanup → incremental re-scan | Use closed-world rules for applications/services and API-preserving rules for libraries |
-| **Cleanup** | Boundary-aware empty class detection → reference check → removal | Preserve externally visible library types while removing closed-world leftovers |
+## Usage
 
-Each phase can trigger new simplification opportunities in earlier steps — the pipeline converges automatically.
-
-## Supported Ecosystems
-
-| Ecosystem | Languages | Extensions |
-|-----------|-----------|------------|
-| Android | Java, Kotlin | `.java`, `.kt`, `.kts` |
-| Java/Kotlin Server | Java, Kotlin | `.java`, `.kt`, `.kts` |
-| Go Server | Go | `.go` |
-| Swift iOS | Swift | `.swift` |
-| Dart/Flutter | Dart | `.dart` |
-
-## What Gets Cleaned
-
-### Phase 1: Constant Folding + Expression Simplification
-
-| Transformation | Before | After |
-|---|---|---|
-| Configured constant replacement | `if (BuildConfig.INTERNATIONAL)` | `if (false)` |
-| Boolean negation folding | `!true`, `!false` | `false`, `true` |
-| Boolean equality simplification | `true == false`, `x != x` | `false` |
-| Compound boolean short-circuit | `true && expr`, `false \|\| expr` | `expr` |
-| Compound boolean identity | `false && expr`, `true \|\| expr` | `false`, `true` |
-| Ternary/conditional resolution | `true ? A : B`, `false ? A : B` | `A`, `B` |
-| Dead if-branch elimination (true) | `if (true) { A } else { B }` | `A` |
-| Dead if-branch elimination (false) | `if (false) { A } else { B }` | `B` |
-| Dead if without else | `if (false) { ... }` | *(removed)* |
-| Chained else-if collapse | `else if (true) { A } else ...` | `else { A }` |
-| Unreachable code after if-exit | `if (true) { return; } dead();` | `return;` |
-| Standalone unreachable removal | `return; deadCode(); moreCode();` | `return;` |
-| Loop unreachable removal | `for (...) { break; dead(); }` | `for (...) { break; }` |
-| Kotlin if-expression (return) | `return if (true) { A } else B` | `return A` |
-| Kotlin if-expression (assignment) | `val x = if (false) A else B` | `val x = B` |
-| Boolean-to-string concat | `true + ""` | `"true"` |
-| Redundant paren unwrap | `(true)` | `true` |
-| Local constant propagation | `final boolean isPrimary = true; if (isPrimary)` | `if (true)` → eliminated |
-| Unused boolean var cleanup | `final boolean isPrimary = true;` (no remaining uses) | *(removed)* |
-
-### Phase 2: Boolean Method Inlining
-
-| Transformation | Description |
-|---|---|
-| Boolean method inlining | `private fun isEnabled(): Boolean = true` → all `isEnabled()` replaced with `true` |
-| Static method inlining | `static boolean isOldMode() { return false; }` → `ClassName.isOldMode()` replaced with `false` |
-| Cascade simplification | After inlining, Phase 1 re-runs to simplify newly-constant expressions |
-| Private method deletion | After all call sites are inlined, the now-orphaned method definition is removed |
-
-Only boolean-returning methods are inlined because their literals unlock dead-branch cleanup. String, numeric, and `null`/`nil` getters are not propagated into callers; they remain encapsulated while referenced and are deleted only when project-wide analysis proves the definition unused.
-
-### Phase 3: Dead Member Cleanup
-
-| Transformation | Description |
-|---|---|
-| Empty void method removal | `private void doNothing() {}` → call sites removed, definition deleted |
-| Orphaned constant method removal | Methods returning constants (`true`/`false`/`null`/`42`/`"text"`) with no remaining callers |
-| Cross-file call-site removal | Same as above but across multiple files in the project |
-| Unused field removal | Unreferenced fields are removed only after project-wide reference and safety checks |
-| Multi-variable declaration safety | `int used, unused;` is kept unless every declarator can be removed safely |
-| Cascade simplification | After removals, Phase 1 re-runs to simplify any affected control flow |
-
-### Cleanup: Empty Class & File Removal
-
-| Transformation | Description |
-|---|---|
-| Empty class detection | Classes with no remaining methods, fields, or inner classes |
-| Cross-project reference check | Only removes classes not referenced by any other file in the project |
-| Empty file deletion | Files left with only `package`/`import` declarations are deleted |
-
-## What Is Explicitly Preserved
-
-The tool is **conservative by design** — when in doubt, code is kept.
-
-### Always Preserved
-
-| Category | Examples | Reason |
-|---|---|---|
-| **Annotated members** | `@Override`, `@Bean`, `@LongLinkObs`, `@objc`, `@IBAction`, `@Composable` | Methods and fields may be generated, injected, or framework-managed |
-| **Abstract / interface methods** | `abstract void process();` | Part of a contract |
-| **Override methods** | `override fun onResume()` | Called by framework, not user code |
-| **Native methods** | `native void jni_call();` | JNI/FFI binding |
-| **Framework lifecycle methods** | `onCreate`, `viewDidLoad`, `build`, `main`, `init`, `ServeHTTP` | Language adapter protects them by name |
-| **Open-world public API** | Java/Kotlin public members, Go exports, Swift public declarations, Dart public names | May be called by consumers outside the scanned repository |
-| **Dart private naming** | `_helper()` is library-private | Constant/empty cleanup is supported; arbitrary bodies remain unless the adapter can prove every reference form |
-| **Dynamic references** | `#selector(doAction)`, `android:onClick`, XML `action`/`selector` attributes | Layout, Storyboard, and generated callback references are scanned |
-| **Static and inherited calls** | Java/Kotlin static imports and calls through subclasses | Project indexes resolve imported and transitively inherited members |
-| **Short symbol names** | Methods such as `d()`, `e()`, or `bs()` | Short names participate in the same reference checks as other symbols |
-| **Calls with parameters** | `helper(expensiveArg())` | Call sites are never substituted; arbitrary definitions require explicit adapter approval before zero-reference deletion |
-| **Public methods with callers** | Referenced from other files or via reflection | Cross-file reference analysis prevents deletion |
-| **Multi-variant methods** | Same name returns different values in different source sets | Source-set conflict detection skips them |
-
-### Language Adapter Protection
-
-Each language has a dedicated adapter (`pruner/adapters/`) that owns:
-
-- **Protected method names**: lifecycle hooks, framework callbacks, runtime-required entry points
-- **Visibility rules**: Go unexported = safe, Dart `_` prefix = file-private, Swift `fileprivate` = file-scoped
-- **Syntax normalization**: exact parameter arity, receiver/declaring type, callable and field node shapes
-- **Contract extraction**: Java/Kotlin interfaces, Go structural interfaces, Swift protocols, Dart abstract/implements relationships
-- **Language transforms**: immutable local booleans, Kotlin `if` expressions, and branch-scope rules
-
-## Quick Start
+Python 3.10 or newer is required.
 
 ```bash
 git clone https://github.com/OldJii/dead-code-pruner.git
 cd dead-code-pruner
-
 pip install -r requirements.txt
-
-cp pruner.example.yaml /path/to/your/project/pruner.yaml
-# Edit pruner.yaml with your project's constants
-
-# Preview changes
-python3 -m pruner /path/to/your/project --dry-run
-
-# Run full pipeline
-python3 -m pruner /path/to/your/project
+cp pruner.example.yaml pruner.yaml
 ```
 
-## Usage
-
-```bash
-# Full pipeline (auto-discovers pruner.yaml)
-python3 -m pruner .
-
-# Explicit config
-python3 -m pruner src/ --config pruner.yaml
-
-# Dry run — scan and report only
-python3 -m pruner . --dry-run
-
-# Run specific phases
-python3 -m pruner . --phases 1          # constant folding only
-python3 -m pruner . --phases 1,2        # phases 1 + 2
-
-# Override automatic project-boundary detection
-python3 -m pruner . --world closed       # application / deployed service
-python3 -m pruner . --world open         # library / SDK
-```
-
-## Configuration
-
-### YAML (recommended)
+Edit `pruner.yaml` and replace the examples with the constants retired in your project:
 
 ```yaml
 project_boundary:
   mode: auto
-  modules:
-    ":app": closed
-    ":sdk": open
 
 replacements:
-  - pattern: "AppConfig.IS_DEBUG"
-    value: false
   - pattern: "FeatureFlags.LEGACY_MODE"
     value: false
+  - pattern: "BuildConfig.CURRENT_VARIANT"
+    value: true
 ```
 
-### Flat key-value format
-
-```yaml
-AppConfig.IS_DEBUG: false
-FeatureFlags.LEGACY_MODE: false
-```
-
-### JSON
-
-```json
-{
-  "replacements": [
-    { "pattern": "AppConfig.IS_DEBUG", "value": false }
-  ]
-}
-```
-
-## Multi-Module Project Support
-
-The tool automatically detects multi-module project layouts:
-
-| Build System | Detection | Module Scope |
-|---|---|---|
-| **Gradle** (Android / JVM) | `settings.gradle` / `settings.gradle.kts` | Each `:module` is a separate scope |
-| **Maven** | `pom.xml` with child modules | Each child `pom.xml` directory |
-| **Go** | `go.mod` | Root module + nested `go.mod` directories |
-| **Dart/Flutter** | `pubspec.yaml` | Root package + `packages/` sub-packages |
-| **Xcode** | `.xcworkspace` / `.xcodeproj` | Single workspace scope |
-
-Module awareness prevents same-named methods in different modules from being conflated during analysis. For example, `ModuleA:Utils.isEnabled()` and `ModuleB:Utils.isEnabled()` are tracked independently.
-
-The same module map drives project-boundary detection. Application, executable, service, Flutter app, root Go executable, and Xcode app metadata are strong closed-world signals. Unpublished Gradle library modules inside such a build share the host's closed boundary because the library plugin describes compilation shape rather than external ownership. Publishing metadata and standalone library products are open-world signals and win conflicts; missing or ambiguous standalone layouts also fall back to open-world cleanup.
-
-Closed-world modules may remove unreferenced externally visible declarations because every source consumer is expected inside the scan. Open-world modules only delete language-private declarations; public methods, constants, fields, and empty types remain available to external consumers. Mixed repositories apply the policy independently per module. `project_boundary.modules` or `--world` handles internal libraries, unusual build logic, and deployment layouts that cannot be inferred statically.
-
-## Architecture
-
-```
-pruner/
-├── cli.py              Command-line interface
-├── pipeline.py         3-phase orchestrator with quality gate
-├── transform.py        Single-file pipeline (steps 1–4)
-├── validation.py       AST validation — rollback on new parse errors
-├── lang.py             Language registry (tree-sitter parsers)
-├── ui.py               Terminal output formatting (ANSI colors, progress bars)
-├── ast_utils.py        Core AST manipulation
-├── config.py           Configuration file discovery
-├── adapters/           Language-specific safety rules
-│   ├── base.py            Abstract adapter interface
-│   ├── java.py            Java / Android syntax, contracts, and entry points
-│   ├── kotlin.py          Kotlin syntax, contracts, and if expressions
-│   ├── jvm_common.py      Callbacks shared by Java and Kotlin
-│   ├── contract_utils.py  Grammar-neutral contract parsing helpers
-│   ├── go.py              Go visibility & testing conventions
-│   ├── swift.py           UIKit / SwiftUI / Storyboard safety
-│   └── dart.py            Flutter widget lifecycle & naming
-├── steps/              Transformation passes
-│   ├── constant_fold.py    Step 1: constant replacement + local propagation
-│   ├── bool_simplify.py    Step 2: simple boolean algebra
-│   ├── compound_bool.py    Step 3: compound boolean + ternary
-│   ├── if_blocks.py        Step 4: dead branch elimination
-│   ├── unreachable.py      Step 1d: unreachable code removal
-│   ├── kotlin_expr.py      Kotlin if-expression pre-pass
-│   ├── method_inline.py    Step 5: boolean method inlining
-│   ├── dead_methods.py     Step 6: dead method cleanup
-│   └── empty_cleanup.py    Step 7: empty class & file cleanup
-└── analysis/           Project-level analysis
-    ├── method_scanner.py     AST method detection (adapter-aware)
-    ├── field_scanner.py      Conservative unused-field detection
-    ├── contracts.py          Incremental per-file contract graph
-    ├── project_scan.py       Unified single-pass project scan
-    ├── project_layout.py     Multi-module project detection
-    ├── project_boundary.py   Closed/open-world detection and module policy
-    ├── ref_index.py          Cross-file reference index
-    ├── text_index.py         Compact textual and dynamic-reference index
-    └── code_edit.py          Call-site replacement & deletion
-```
-
-## Safety Mechanisms
-
-- **AST-precise**: tree-sitter precisely distinguishes code from comments and strings
-- **Language-native literals**: Java/Kotlin text blocks, Go raw strings, Swift extended strings, Dart raw strings, and interpolation boundaries are protected
-- **AST validation gate**: every transformation is validated — changes that introduce new parse errors are automatically rolled back
-- **Per-file rollback**: project-level method, field, and empty-class edits are parsed again before being committed to disk
-- **Language adapters**: each ecosystem has dedicated entry-point and visibility rules (lifecycle methods, annotations, naming conventions)
-- **Project-boundary aware**: applications/services use closed-world cleanup; libraries/SDKs preserve external APIs; unknown modules default to open
-- **Annotation-safe**: annotated methods and fields are never deleted (framework/DI/AOP/generated-code managed)
-- **Chain-call aware**: instance methods called via `obj.field.method()` are detected via cross-file reference analysis
-- **Inheritance-aware**: skips abstract, interface, and framework base-class methods, and resolves inherited static calls transitively
-- **Import-aware**: Java and Kotlin static imports are indexed before removing member declarations
-- **JVM accessor-aware**: Java calls to getters generated for Kotlin properties, including delegated and boolean-style properties, protect the source declaration
-- **Dynamic-resource aware**: Android XML callbacks/actions and Apple selector references protect their source declarations
-- **Overload-safe**: parameter count matching prevents confusing overloaded methods
-- **Declaration-safe**: comments cannot bind to the following declaration, and multi-variable fields are removed atomically
-- **Java switch-safe**: shared switch-scope declarations are preserved or hoisted when a constant branch exits early
-- **Dangling reference check**: methods are only deleted after verifying no remaining call sites exist
-- **Module-aware**: multi-module projects (Gradle, Go, Dart) track methods per module to avoid cross-module name collision
-- **Exact dry-run**: runs the real converging pipeline in an isolated copy, including cascades, without writing through source-tree symlinks
-- **Synthetic fixtures only**: tests and documentation use generic packages, identifiers, paths, scenarios, and measurements; source material from external projects must be anonymized before inclusion
-- **Quality gate**: pipeline summary reports rejected file edits and line change statistics
-- **Conservative by design**: when in doubt, the method is kept
-
-## Performance and Progress
-
-- Phase 1 processes the project once because each file already converges internally; Phase 3 parses project sources through one unified scan and incrementally refreshes changed files.
-- CPU-heavy scans use parallel workers on sufficiently large projects, while incremental rounds only revisit changed files.
-- Output has one hierarchy—Phase → Round → Stage—and every percentage stage continuously rewrites one terminal line. Redirected output emits only the final state for each stage.
-- Runtime depends on project size, filesystem cache, and convergence rounds; large initial scans use multiple processes and later rounds only revisit modified files.
-
-## Requirements
-
-- Python 3.10+
-- Dependencies: `pip install -r requirements.txt`
-
-## Testing
+Run the cleanup against a project directory:
 
 ```bash
-python3 tests/run_tests.py           # 5-language step 1–4 tests
-python3 tests/run_project_tests.py   # 14 project-level safety and cleanup suites
-python3 tests/test_language_matrix.py # 5-language syntax/safety/project parity matrix
-python3 tests/test_project_boundary.py # app, SDK, service, mixed-repo boundary policy
-python3 tests/test_ui.py             # in-place progress and hierarchy rendering
+python3 -m pruner /path/to/your/project --config pruner.yaml
 ```
 
-## Limitations
+Run it on a separate Git branch, inspect the resulting diff, and compile and test the target project before merging the changes.
 
-- Local propagation is limited to immutable booleans (`final boolean`, Kotlin `val`, Go `const`, Swift `let`, Dart `final`/`const`)
-- Dead member detection is conservative — annotated, generated, dynamically referenced, ambiguous, and open-world public declarations are preserved
-- Only single-return-statement boolean methods are inlined
-- Does not analyse method parameters for side effects
-- Empty class removal requires no cross-file references (enum types are always preserved)
+## Using It Outside Android
+
+The implementation includes language adapters and tests for Java, Kotlin, Go, Swift, and Dart, but its large-scale production use has so far been validated only on Android projects.
+
+For a non-Android repository, start with a fork. If a language construct is not handled correctly, use the failing source as a small reproducible fixture, ask an AI coding agent to analyze the AST or reference-resolution gap, and add an input/expected-output test before adjusting the adapter or cleanup rule. Once the new case and the existing suites all pass, the behavior is fixed as a repeatable rule and the cleanup can be applied to the target repository with confidence.
+
+Run the complete test set after extending the tool:
+
+```bash
+python3 tests/run_tests.py
+python3 tests/run_project_tests.py
+python3 tests/test_language_matrix.py
+python3 tests/test_project_boundary.py
+```
+
+## How It Works
+
+tree-sitter parses source files into syntax trees, allowing the tool to distinguish expressions, declarations, calls, comments, strings, and control-flow boundaries without relying on fragile text replacement.
+
+The tool first simplifies each file from the configured boolean facts. It then builds project-level indexes for declarations, references, inheritance, contracts, generated accessors, and dynamic entry points. Only declarations with no remaining safe reference are removed. Modified files are analyzed again, allowing one deletion to expose the next until the project reaches a stable result.
+
+Language adapters supply the syntax and framework rules for each ecosystem, while project-boundary detection preserves externally visible APIs in libraries and permits broader cleanup in applications and deployed services.
+
+The main pipeline has two phases:
+
+1. **Source simplification** runs eight syntax-level steps in source order and repeats them per file until that file is stable.
+2. **Project cleanup** scans the project once, removes provably dead declarations, reruns source simplification on changed files, refreshes those files in the project index, and repeats until stable. It then removes unreferenced empty classes and files.
+
+Project-wide boolean-method inlining is also exposed as a standalone utility for focused integrations, but it is not a separate pipeline phase.
 
 ## License
 

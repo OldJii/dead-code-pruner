@@ -15,8 +15,8 @@ sys.path.insert(0, PROJECT_DIR)
 
 from pruner.analysis.project_boundary import detect_project_boundary  # noqa: E402
 from pruner.config import load_boundary_options  # noqa: E402
-from pruner.steps.dead_methods import step6_project  # noqa: E402
-from pruner.steps.empty_cleanup import step7_empty_cleanup  # noqa: E402
+from pruner.steps.dead_methods import phase2_step2_cleanup_dead_declarations  # noqa: E402
+from pruner.steps.empty_cleanup import phase2_step5_cleanup_empty_artifacts  # noqa: E402
 from pruner.transform import load_config  # noqa: E402
 
 
@@ -153,7 +153,7 @@ class ProjectBoundaryCleanupTests(unittest.TestCase):
             source = Path(tmp) / 'ApiSurface.java'
             source.write_text(self.JAVA_SOURCE, encoding='utf-8')
             with contextlib.redirect_stdout(io.StringIO()):
-                step6_project(tmp, world=world)
+                phase2_step2_cleanup_dead_declarations(tmp, world=world)
             return source.read_text(encoding='utf-8')
 
     def test_open_world_preserves_public_api_and_removes_private_members(self):
@@ -182,7 +182,7 @@ class ProjectBoundaryCleanupTests(unittest.TestCase):
                     source = Path(tmp) / ('surface' + extension)
                     source.write_text(source_text, encoding='utf-8')
                     with contextlib.redirect_stdout(io.StringIO()):
-                        step6_project(tmp, world=world)
+                        phase2_step2_cleanup_dead_declarations(tmp, world=world)
                     content = source.read_text(encoding='utf-8')
                     self.assertEqual(
                         exported_kept, 'exportedHook' in content)
@@ -215,7 +215,7 @@ class ProjectBoundaryCleanupTests(unittest.TestCase):
                 encoding='utf-8')
 
             with contextlib.redirect_stdout(io.StringIO()):
-                step6_project(str(root))
+                phase2_step2_cleanup_dead_declarations(str(root))
             self.assertNotIn('unused()', app_source.read_text(encoding='utf-8'))
             self.assertIn('unused()', sdk_source.read_text(encoding='utf-8'))
 
@@ -236,7 +236,7 @@ class ProjectBoundaryCleanupTests(unittest.TestCase):
                 encoding='utf-8')
 
             with contextlib.redirect_stdout(io.StringIO()):
-                step6_project(tmp, world='closed')
+                phase2_step2_cleanup_dead_declarations(tmp, world='closed')
             content = properties.read_text(encoding='utf-8')
             self.assertIn('deferredLabel', content)
             self.assertIn('isReady', content)
@@ -247,10 +247,10 @@ class ProjectBoundaryCleanupTests(unittest.TestCase):
             source = Path(tmp) / 'PublicSurface.java'
             source.write_text('public class PublicSurface {}\n', encoding='utf-8')
             with contextlib.redirect_stdout(io.StringIO()):
-                step7_empty_cleanup(tmp, world='open')
+                phase2_step5_cleanup_empty_artifacts(tmp, world='open')
             self.assertTrue(source.exists())
             with contextlib.redirect_stdout(io.StringIO()):
-                step7_empty_cleanup(tmp, world='closed')
+                phase2_step5_cleanup_empty_artifacts(tmp, world='closed')
             self.assertFalse(source.exists())
 
     def test_open_world_removes_language_private_empty_types(self):
@@ -265,7 +265,7 @@ class ProjectBoundaryCleanupTests(unittest.TestCase):
                 source = Path(tmp) / ('PrivateEmpty' + extension)
                 source.write_text(source_text, encoding='utf-8')
                 with contextlib.redirect_stdout(io.StringIO()):
-                    step7_empty_cleanup(tmp, world='open')
+                    phase2_step5_cleanup_empty_artifacts(tmp, world='open')
                 self.assertFalse(source.exists())
 
     def test_go_export_is_preserved_open_and_pruned_for_service(self):
@@ -282,7 +282,7 @@ class ProjectBoundaryCleanupTests(unittest.TestCase):
                 source = root / 'main.go'
                 source.write_text(source_text, encoding='utf-8')
                 with contextlib.redirect_stdout(io.StringIO()):
-                    step6_project(tmp, world=world)
+                    phase2_step2_cleanup_dead_declarations(tmp, world=world)
                 content = source.read_text(encoding='utf-8')
                 self.assertEqual(exported_kept, 'ExportedUnused()' in content)
                 self.assertNotIn('privateUnused()', content)
@@ -297,7 +297,7 @@ class ProjectBoundaryCleanupTests(unittest.TestCase):
                 '    _unusedValue = true;\n',
                 encoding='utf-8')
             with contextlib.redirect_stdout(io.StringIO()):
-                step6_project(tmp, world='open')
+                phase2_step2_cleanup_dead_declarations(tmp, world='open')
             content = source.read_text(encoding='utf-8')
             self.assertIn('_runtimeValue', content)
             self.assertNotIn('_unusedValue', content)

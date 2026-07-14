@@ -1,4 +1,4 @@
-"""Step 4 — if(true)/if(false) block elimination.
+"""Phase 1, Step 6 — if(true)/if(false) block elimination.
 
 Removes dead branches where the condition has been resolved to a constant
 boolean, inlining the live branch and deleting dead code after early exits.
@@ -270,7 +270,8 @@ def _alt_text_b(alt_node, cb):
 
 # ── main entry ──────────────────────────────────────────────
 
-def step4_if_blocks(cb: bytes, preserve_branch_scope: bool = True) -> bytes:
+def phase1_step6_eliminate_dead_branches(
+        cb: bytes, preserve_branch_scope: bool = True) -> bytes:
     for _ in range(500):
         root, cb = parse(cb)
         mod = False
