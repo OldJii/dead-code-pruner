@@ -20,21 +20,54 @@ Starting from configured constants, the tool can produce source changes such as:
 - Remove unreferenced empty classes and source files left with no declarations.
 - Repeat cascading cleanup until no further source changes can be derived.
 
-For example, a feature flag and the helpers that only support its retired path can collapse into a single live statement:
+For example, a retired feature can collapse across multiple files into the remaining live path:
 
 ```diff
-- if (FeatureFlags.LEGACY_MODE) {
--     showLegacyFeature();
-- } else if (isLegacyMode()) {
--     showLegacyFallback();
-- } else {
--     showCurrentFeature();
-- }
+diff --git a/LegacyFeatureController.java b/LegacyFeatureController.java
+--- a/LegacyFeatureController.java
++++ b/LegacyFeatureController.java
+@@
+ final class LegacyFeatureController {
+-    private static final boolean RETIRED_DEFAULT = false;
 -
-- private boolean isLegacyMode() {
--     return false;
-- }
-+ showCurrentFeature();
+-    private boolean isLegacyMode() {
+-        return false;
+-    }
+-
+-    private void recordLegacyExposure() {}
+-
+     void render() {
+-        final boolean legacyEnabled = FeatureFlags.LEGACY_MODE;
+-        recordLegacyExposure();
+-        if (!legacyEnabled
+-                && (LegacyFeatureController.RETIRED_DEFAULT || isLegacyMode())) {
+-            RetiredFeature.renderLegacy();
+-            return;
+-            unreachableLegacyCleanup();
+-        } else {
+-            renderCurrent();
+-        }
++        renderCurrent();
+     }
+ }
+
+diff --git a/LegacyScreen.kt b/LegacyScreen.kt
+--- a/LegacyScreen.kt
++++ b/LegacyScreen.kt
+@@
+-val title = if (false) legacyTitle else currentTitle
++val title = currentTitle
+
+diff --git a/RetiredFeature.java b/RetiredFeature.java
+deleted file mode 100644
+--- a/RetiredFeature.java
++++ /dev/null
+@@
+-package com.example.legacy;
+-
+-final class RetiredFeature {
+-    static void renderLegacy() {}
+-}
 ```
 
 The cleanup is intentionally conservative. Annotated declarations, framework entry points, contracts, overrides, dynamic references, and public APIs that may be used outside the scanned repository are preserved unless the tool can prove they are safe to remove.
