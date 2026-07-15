@@ -26,7 +26,7 @@ from ..analysis.project_boundary import (
 )
 from ..analysis.ref_index import (
     clear_text_index_cache, is_in_comment_or_string,
-    iter_dynamic_reference_names,
+    iter_dynamic_reference_names, iter_implicit_reference_names,
 )
 from ..analysis.contracts import promote_unreferenced
 from ..analysis.code_edit import (
@@ -170,6 +170,7 @@ def phase2_step2_cleanup_dead_declarations(
         member_ref_index=scan.member_ref_index,
         type_ref_index=scan.type_ref_index,
         dynamic_ref_index=scan.dynamic_ref_index,
+        implicit_ref_index=scan.implicit_ref_index,
         boundary=boundary)
     if unused_extra:
         ui.info(f"Unused non-constant methods: {len(unused_extra)}")
@@ -193,6 +194,7 @@ def phase2_step2_cleanup_dead_declarations(
         member_ref_index=scan.member_ref_index,
         type_ref_index=scan.type_ref_index,
         dynamic_ref_index=scan.dynamic_ref_index,
+        implicit_ref_index=scan.implicit_ref_index,
         boundary=boundary)
     safe_count = sum(1 for d in all_dead if d['safe_to_inline'])
     ui.info(f"Pre-check complete: safe={safe_count}  "
@@ -376,6 +378,8 @@ def phase2_step2_cleanup_dead_declarations(
             name_set -= modified_set
         for name_set in scan.member_ref_index.values():
             name_set -= modified_set
+        for name_set in scan.implicit_ref_index.values():
+            name_set -= modified_set
         from ..analysis.ref_index import iter_reference_names
         for fp in files_modified:
             try:
@@ -388,6 +392,9 @@ def phase2_step2_cleanup_dead_declarations(
                     ref_index.setdefault(name, set()).add(fp)
                 for name in member_names:
                     scan.member_ref_index.setdefault(name, set()).add(fp)
+                ext = os.path.splitext(fp)[1].lower()
+                for name in iter_implicit_reference_names(content, ext):
+                    scan.implicit_ref_index.setdefault((ext, name), set()).add(fp)
             except Exception:
                 pass
     clear_text_index_cache()
@@ -451,7 +458,8 @@ def phase2_step2_cleanup_dead_declarations(
                         content_cache=content_cache,
                         member_ref_index=scan.member_ref_index,
                         type_ref_index=scan.type_ref_index,
-                        dynamic_ref_index=scan.dynamic_ref_index):
+                        dynamic_ref_index=scan.dynamic_ref_index,
+                        implicit_ref_index=scan.implicit_ref_index):
                     continue
                 if contracts.is_contract_method(dm.get('class_name'), dm['name']):
                     continue
@@ -499,6 +507,7 @@ def _collect_unused_methods(scan, contracts, ref_index,
                             member_ref_index: dict[str, set[str]] | None = None,
                             type_ref_index: dict[str, set[str]] | None = None,
                             dynamic_ref_index: dict[str, set[str]] | None = None,
+                            implicit_ref_index: dict[tuple[str, str], set[str]] | None = None,
                             boundary: ProjectBoundary | None = None,
                             ) -> list[dict]:
     """Find unused non-constant methods allowed by the language policy.
@@ -557,7 +566,8 @@ def _collect_unused_methods(scan, contracts, ref_index,
                                content_cache=content_cache,
                                member_ref_index=member_ref_index,
                                type_ref_index=type_ref_index,
-                               dynamic_ref_index=dynamic_ref_index):
+                               dynamic_ref_index=dynamic_ref_index,
+                               implicit_ref_index=implicit_ref_index):
             continue
 
         rec = dict(m)
@@ -799,6 +809,7 @@ def _promote_unreferenced(
         member_ref_index: dict[str, set[str]] | None = None,
         type_ref_index: dict[str, set[str]] | None = None,
         dynamic_ref_index: dict[str, set[str]] | None = None,
+        implicit_ref_index: dict[tuple[str, str], set[str]] | None = None,
         boundary: ProjectBoundary | None = None):
     candidates = [dm for dm in all_dead if not dm.get('safe_to_inline')]
     same_file_live = _batch_same_file_refs(
@@ -821,7 +832,8 @@ def _promote_unreferenced(
                     content_cache=content_cache,
                     member_ref_index=member_ref_index,
                     type_ref_index=type_ref_index,
-                    dynamic_ref_index=dynamic_ref_index):
+                    dynamic_ref_index=dynamic_ref_index,
+                    implicit_ref_index=implicit_ref_index):
                 has_ref = True
 
         if promote_unreferenced(
@@ -845,14 +857,26 @@ def _has_same_file_refs(dm: dict, cm: dict, content: str) -> bool:
     else:
         call_pat = re.compile(r'(?<!\w)' + re.escape(method_name) + r'\s*\(')
     ref_pat = re.compile(r'::' + re.escape(method_name) + r'\b')
+    adapter = get_adapter(os.path.splitext(dm.get('filepath', ''))[1].lower())
+    implicit_patterns = adapter.implicit_reference_patterns if adapter else ()
+    offset = 0
     for i, line in enumerate(lines):
         if decl_start <= i <= decl_end:
+            offset += len(line) + 1
             continue
         if line.strip().startswith('//') or line.strip().startswith('/*'):
+            offset += len(line) + 1
             continue
         if (call_pat.search(line) or ref_pat.search(line)
                 or has_dynamic_symbol_ref(line, method_name)):
             return True
+        for pattern in implicit_patterns:
+            for match in pattern.finditer(line):
+                if (match.group(1) == method_name
+                        and not is_in_comment_or_string(
+                            content, offset + match.start(1))):
+                    return True
+        offset += len(line) + 1
     return False
 
 
@@ -893,6 +917,7 @@ def _batch_same_file_refs(
         reference_patterns = [_ANY_CALL_PAT, _ANY_METHOD_REF_PAT]
         if adapter:
             reference_patterns.extend(adapter.implicit_call_patterns)
+            reference_patterns.extend(adapter.implicit_reference_patterns)
         call_lines: dict[str, set[int]] = defaultdict(set)
         offset = 0
         for line_no, line in enumerate(content.splitlines(keepends=True)):

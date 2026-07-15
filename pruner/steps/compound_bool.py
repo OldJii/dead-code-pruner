@@ -7,6 +7,8 @@ Resolves:
   - ``true + ""`` → ``"true"``
 """
 
+import re
+
 from ..ast_utils import parse, txt, find_all, is_bool, replace_node
 
 
@@ -54,7 +56,8 @@ def _get_binary_parts(node, cb):
             break
     if op_idx is None:
         return ch[0], txt(ch[1], cb), ch[2]
-    left_node = ch[0]
+    left_node = (ch[0] if op_idx == 1
+                 else _SpanNode(ch[0].start_byte, ch[op_idx - 1].end_byte))
     op_text = txt(ch[op_idx], cb)
     if op_idx + 1 == len(ch) - 1:
         right_node = ch[op_idx + 1]
@@ -79,7 +82,34 @@ def _is_cmp_child(node, cb):
     return False
 
 
-def phase1_step4_simplify_compound_expressions(cb: bytes) -> bytes:
+def _may_evaluate_effects(node, cb) -> bool:
+    """Conservatively identify left operands whose evaluation must survive.
+
+    Calls are the important cross-language case.  The node-name check handles
+    normal trees, while the text fallback covers grammars that split a call
+    into identifier/selector nodes (notably Dart).
+    """
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        node_type = getattr(current, 'type', '')
+        if ('call' in node_type or node_type in {
+                'await_expression', 'assignment_expression',
+                'update_expression'}):
+            return True
+        stack.extend(getattr(current, 'children', ()))
+    return bool(re.search(r'\b[A-Za-z_]\w*\s*\(', txt(node, cb)))
+
+
+def phase1_step4_simplify_compound_expressions(
+        cb: bytes, *, preserve_left_effects: bool = False) -> bytes:
+    """Simplify compound expressions.
+
+    ``expr && false`` and ``expr || true`` evaluate ``expr`` before reaching
+    the right-hand constant.  Non-JVM adapters opt into preserving that left
+    operand because it may contain a function call or another side effect.
+    The default retains the established Java/Kotlin behavior byte-for-byte.
+    """
     for _ in range(500):
         root, cb = parse(cb)
         mod = False
@@ -101,12 +131,16 @@ def phase1_step4_simplify_compound_expressions(cb: bytes) -> bytes:
             rep = None
             if op_t == '&&':
                 if l_bool and lv == 'false':    rep = 'false'
-                elif r_bool and rv == 'false':  rep = 'false'
+                elif (r_bool and rv == 'false'
+                      and (not preserve_left_effects
+                           or not _may_evaluate_effects(left, cb))): rep = 'false'
                 elif l_bool and lv == 'true':   rep = txt(right, cb).strip()
                 elif r_bool and rv == 'true':   rep = txt(left, cb).strip()
             elif op_t == '||':
                 if l_bool and lv == 'true':     rep = 'true'
-                elif r_bool and rv == 'true':   rep = 'true'
+                elif (r_bool and rv == 'true'
+                      and (not preserve_left_effects
+                           or not _may_evaluate_effects(left, cb))): rep = 'true'
                 elif l_bool and lv == 'false':  rep = txt(right, cb).strip()
                 elif r_bool and rv == 'false':  rep = txt(left, cb).strip()
 

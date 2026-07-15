@@ -7,7 +7,7 @@ import os
 import re
 from collections import defaultdict
 from ..lang import _PARSERS, SKIP_DIRS
-from ..adapters import all_adapters
+from ..adapters import all_adapters, get_adapter
 from .. import ui
 from .text_index import TextIndex
 
@@ -93,6 +93,22 @@ def iter_reference_names(content: str, *,
         # remains after constant folding.
         for m in _IMPORT_SYMBOL_PAT.finditer(content):
             yield m.group(1)
+
+
+def iter_implicit_reference_names(content: str, ext: str):
+    """Yield callable-value references owned by the active language.
+
+    These names deliberately remain separate from the language-neutral call
+    index.  A Swift callback named ``ready`` must not keep an unrelated Java,
+    Kotlin, Go, or Dart method with the same name alive.
+    """
+    adapter = get_adapter(ext)
+    if adapter is None:
+        return
+    for pattern in adapter.implicit_reference_patterns:
+        for match in pattern.finditer(content):
+            if not is_in_comment_or_string(content, match.start(1)):
+                yield match.group(1)
 
 
 def iter_type_identifiers(content: str):

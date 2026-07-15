@@ -199,6 +199,15 @@ def _swift_evidence(path: str) -> tuple[list[str], list[str]]:
             closed.append('Xcode application product')
     if os.path.isfile(os.path.join(path, 'main.swift')):
         closed.append('Swift executable entry point')
+    # Modern Swift executables often use an @main type instead of a file
+    # literally named main.swift.  Only inspect this module's top-level source
+    # files; nested SwiftPM targets are classified through ProjectLayout.
+    for name in entries:
+        if not name.endswith('.swift'):
+            continue
+        if re.search(r'(?m)^\s*@main\b', _read(os.path.join(path, name), 128_000)):
+            closed.append('Swift @main entry point')
+            break
     return closed, opened
 
 
@@ -215,8 +224,28 @@ def _dart_evidence(path: str) -> tuple[list[str], list[str]]:
         closed.append('Flutter application entry point')
     if not has_main and os.path.isdir(os.path.join(path, 'lib')):
         opened.append('Dart package library surface')
-    if re.search(r'(?m)^\s*publish_to\s*:\s*(?!["\']?none\b)', pubspec):
+    publish_match = re.search(
+        r'(?m)^\s*publish_to\s*:\s*([^\s#]+)', pubspec)
+    publish_value = (publish_match.group(1).strip('"\'').lower()
+                     if publish_match else None)
+    unpublished = publish_value == 'none'
+    if publish_value is not None and not unpublished:
         opened.append('publishable Dart package')
+    bin_dir = os.path.join(path, 'bin')
+    if os.path.isdir(bin_dir):
+        try:
+            bin_entries = os.listdir(bin_dir)
+        except OSError:
+            bin_entries = []
+        has_cli_main = any(
+            name.endswith('.dart')
+            and re.search(r'\b(?:void|Future\s*<\s*void\s*>)?\s*main\s*\(',
+                          _read(os.path.join(bin_dir, name), 128_000))
+            for name in bin_entries)
+        if (has_cli_main
+                and (unpublished
+                     or not os.path.isdir(os.path.join(path, 'lib')))):
+            closed.append('Dart CLI entry point')
     return closed, opened
 
 
@@ -261,6 +290,8 @@ def _classify_module(name: str, path: str, *, enclosing_gradle_closed: bool = Fa
         closed.extend(detected_closed)
         opened.extend(detected_open)
     closed.extend(_deployment_evidence(path))
+    if name.startswith('swiftpm:executable:'):
+        closed.append('SwiftPM executable target')
 
     # Publishing evidence always wins: a module can be executable and expose a
     # supported library product at the same time, and consumers remain unseen.

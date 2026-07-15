@@ -22,6 +22,7 @@ from pruner.steps.dead_methods import (
     phase2_step2_cleanup_dead_declarations,
 )
 from pruner.steps.method_inline import inline_boolean_methods_standalone
+from pruner.transform import run_pipeline
 
 
 SCANNER_CASES = {
@@ -233,6 +234,69 @@ class LanguageParityTests(unittest.TestCase):
                 if cleanup is phase2_step2_cleanup_dead_declarations:
                     self.assertNotIn('orphanLabel()', content)
                     self.assertNotIn('retired()', content)
+
+    def test_non_jvm_callable_values_keep_their_definitions(self):
+        cases = {
+            '.go': (
+                'callbacks.go',
+                'package callbacks\n'
+                'func retired() bool { return false }\n'
+                'var Callback = retired\n',
+                'func retired() bool'),
+            '.swift': (
+                'Callbacks.swift',
+                'private func retired() -> Bool { false }\n'
+                'public let callback: () -> Bool = retired\n',
+                'func retired() -> Bool'),
+            '.dart': (
+                'callbacks.dart',
+                'bool _retired() => false;\n'
+                'final callback = _retired;\n',
+                'bool _retired()'),
+        }
+        for extension, (filename, source_text, definition) in cases.items():
+            with self.subTest(extension=extension), \
+                    tempfile.TemporaryDirectory() as tmp:
+                source = Path(tmp) / filename
+                source.write_text(source_text, encoding='utf-8')
+                with contextlib.redirect_stdout(io.StringIO()):
+                    phase2_step2_cleanup_dead_declarations(tmp, world='open')
+                self.assertIn(definition, source.read_text(encoding='utf-8'))
+
+    def test_cross_file_callable_value_is_in_the_language_reference_index(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            definition = root / 'retired.go'
+            definition.write_text(
+                'package callbacks\nfunc retired() bool { return false }\n',
+                encoding='utf-8')
+            (root / 'callback.go').write_text(
+                'package callbacks\nvar Callback = retired\n',
+                encoding='utf-8')
+            with contextlib.redirect_stdout(io.StringIO()):
+                phase2_step2_cleanup_dead_declarations(tmp, world='open')
+            self.assertIn(
+                'func retired() bool', definition.read_text(encoding='utf-8'))
+
+    def test_non_jvm_boolean_folding_keeps_left_operand_evaluation(self):
+        cases = {
+            '.go': b'package p\nvar a = side() && false\nvar b = side() || true\n',
+            '.swift': b'let a = side() && false\nlet b = side() || true\n',
+            '.dart': b'final a = side() && false;\nfinal b = side() || true;\n',
+        }
+        for extension, source in cases.items():
+            with self.subTest(extension=extension):
+                result = run_pipeline(source, ext=extension)
+                self.assertIn(b'side() && false', result)
+                self.assertIn(b'side() || true', result)
+
+        # Java/Kotlin deliberately retain the established Android output.
+        java = run_pipeline(
+            b'class W { boolean a = side() && false; }', ext='.java')
+        kotlin = run_pipeline(
+            b'class W { val a = side() && false }', ext='.kt')
+        self.assertIn(b'boolean a = false', java)
+        self.assertIn(b'val a = false', kotlin)
 
 
 if __name__ == '__main__':

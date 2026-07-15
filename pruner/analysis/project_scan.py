@@ -22,7 +22,8 @@ from .method_scanner import scan_method_definitions
 from .field_scanner import scan_fields
 from .ref_index import (
     REFERENCE_EXTS, iter_dynamic_reference_names,
-    iter_metadata_reference_names, iter_reference_names,
+    iter_implicit_reference_names, iter_metadata_reference_names,
+    iter_reference_names,
     iter_type_identifiers,
 )
 from .project_layout import ProjectLayout
@@ -45,6 +46,7 @@ def _scan_file_chunk(file_infos):
     member_ref_index: dict[str, set[str]] = defaultdict(set)
     type_ref_index: dict[str, set[str]] = defaultdict(set)
     dynamic_ref_index: dict[str, set[str]] = defaultdict(set)
+    implicit_ref_index: dict[tuple[str, str], set[str]] = defaultdict(set)
     contracts = ContractGraph()
     content_cache: dict[str, str] = {}
     scan_errors: list[tuple[str, str]] = []
@@ -85,12 +87,14 @@ def _scan_file_chunk(file_infos):
             type_ref_index[name].add(fp)
         for name in iter_dynamic_reference_names(content):
             dynamic_ref_index[name].add(fp)
+        for name in iter_implicit_reference_names(content, ext):
+            implicit_ref_index[(ext, name)].add(fp)
 
         contracts.ingest_file(content, ext, fp)
 
     return (methods, fields_list, dict(ref_index), dict(member_ref_index),
-            dict(type_ref_index), dict(dynamic_ref_index), contracts,
-            content_cache, scan_errors)
+            dict(type_ref_index), dict(dynamic_ref_index),
+            dict(implicit_ref_index), contracts, content_cache, scan_errors)
 
 
 # ── Result container ────────────────────────────────────────────
@@ -101,7 +105,7 @@ class ProjectScanResult:
     __slots__ = (
         'all_files', 'ref_files', 'dead_methods', 'all_methods', 'fields',
         'variant_conflicts', 'ref_index', 'member_ref_index', 'type_ref_index',
-        'dynamic_ref_index', 'contracts', 'layout', 'elapsed',
+        'dynamic_ref_index', 'implicit_ref_index', 'contracts', 'layout', 'elapsed',
         'content_cache', 'boundary',
     )
 
@@ -116,6 +120,7 @@ class ProjectScanResult:
         self.member_ref_index: dict[str, set[str]] = defaultdict(set)
         self.type_ref_index: dict[str, set[str]] = defaultdict(set)
         self.dynamic_ref_index: dict[str, set[str]] = defaultdict(set)
+        self.implicit_ref_index: dict[tuple[str, str], set[str]] = defaultdict(set)
         self.contracts: ContractGraph = ContractGraph()
         self.layout: ProjectLayout | None = None
         self.elapsed: float = 0.0
@@ -150,6 +155,8 @@ class ProjectScanResult:
         for name_set in self.type_ref_index.values():
             name_set -= modified_set
         for name_set in self.dynamic_ref_index.values():
+            name_set -= modified_set
+        for name_set in self.implicit_ref_index.values():
             name_set -= modified_set
         for fp in modified_files:
             self.content_cache.pop(fp, None)
@@ -202,7 +209,7 @@ class ProjectScanResult:
                 # already merged from completed workers.
                 for partial in partials:
                     (methods, fields, ref_idx, member_idx, type_idx, dynamic_idx,
-                     contracts, cc, scan_errors) = partial
+                     implicit_idx, contracts, cc, scan_errors) = partial
                     for fp, message in scan_errors:
                         ui.warn(f"Skipped {fp}: {message}")
                     for m in methods:
@@ -218,6 +225,8 @@ class ProjectScanResult:
                         self.type_ref_index[name].update(fps)
                     for name, fps in dynamic_idx.items():
                         self.dynamic_ref_index[name].update(fps)
+                    for key, fps in implicit_idx.items():
+                        self.implicit_ref_index[key].update(fps)
                     self.contracts.merge(contracts)
                     self.content_cache.update(cc)
             except Exception:
@@ -267,6 +276,8 @@ class ProjectScanResult:
                 self.type_ref_index[name].add(fp)
             for name in iter_dynamic_reference_names(content):
                 self.dynamic_ref_index[name].add(fp)
+            for name in iter_implicit_reference_names(content, ext):
+                self.implicit_ref_index[(ext, name)].add(fp)
             self.contracts.ingest_file(content, ext, fp)
             if show_progress and ((idx + 1) % interval == 0 or idx + 1 == total):
                 ui.progress(idx + 1, total, "Incremental scanning")
@@ -315,7 +326,7 @@ def _scan_parallel(result: ProjectScanResult, file_infos: list,
         for future in as_completed(futures):
             chunk_len = futures[future]
             (methods, fields, ref_idx, member_idx, type_idx, dynamic_idx,
-             contracts, content_cache, scan_errors) = future.result()
+             implicit_idx, contracts, content_cache, scan_errors) = future.result()
             for fp, message in scan_errors:
                 ui.warn(f"Skipped {fp}: {message}")
 
@@ -335,6 +346,8 @@ def _scan_parallel(result: ProjectScanResult, file_infos: list,
                 result.type_ref_index[name].update(fps)
             for name, fps in dynamic_idx.items():
                 result.dynamic_ref_index[name].update(fps)
+            for key, fps in implicit_idx.items():
+                result.implicit_ref_index[key].update(fps)
 
             result.contracts.merge(contracts)
             result.content_cache.update(content_cache)
@@ -395,6 +408,8 @@ def _scan_sequential(result: ProjectScanResult, file_infos: list,
             result.type_ref_index[name].add(fp)
         for name in iter_dynamic_reference_names(content):
             result.dynamic_ref_index[name].add(fp)
+        for name in iter_implicit_reference_names(content, ext):
+            result.implicit_ref_index[(ext, name)].add(fp)
 
         result.contracts.ingest_file(content, ext, fp)
 
@@ -478,6 +493,7 @@ def scan_project(root_dir: str, *, progress_interval: int = 500,
             result.member_ref_index.clear()
             result.type_ref_index.clear()
             result.dynamic_ref_index.clear()
+            result.implicit_ref_index.clear()
             result.contracts = ContractGraph()
             result.content_cache.clear()
             _scan_sequential(result, file_infos, progress_interval)

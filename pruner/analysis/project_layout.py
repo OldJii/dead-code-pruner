@@ -26,7 +26,7 @@ class ProjectLayout:
     @property
     def kind(self) -> str:
         """Project kind: ``'gradle'``, ``'go'``, ``'dart'``, ``'maven'``,
-        ``'xcode'``, or ``'single'``."""
+        ``'swiftpm'``, ``'xcode'``, or ``'single'``."""
         self._ensure_detected()
         return self._kind
 
@@ -72,6 +72,8 @@ class ProjectLayout:
             self._kind = 'dart'
         elif self._try_maven():
             self._kind = 'maven'
+        elif self._try_swiftpm():
+            self._kind = 'swiftpm'
         elif self._try_xcode():
             self._kind = 'xcode'
         else:
@@ -129,6 +131,27 @@ class ProjectLayout:
     # ── Go ────────────────────────────────────────────────────
 
     def _try_go(self) -> bool:
+        work_file = os.path.join(self.root, 'go.work')
+        if os.path.isfile(work_file):
+            try:
+                with open(work_file, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read()
+            except OSError:
+                content = ''
+            paths = re.findall(r'(?m)^\s*use\s+([^\s#]+)', content)
+            paths.extend(re.findall(r'(?m)^\s*(\.?\.?/[^\s#]+)\s*$', content))
+            seen: set[str] = set()
+            for raw in paths:
+                rel = raw.strip('"\'').rstrip('/')
+                candidate = os.path.abspath(os.path.join(self.root, rel))
+                if candidate in seen or not os.path.isfile(os.path.join(candidate, 'go.mod')):
+                    continue
+                seen.add(candidate)
+                name = os.path.relpath(candidate, self.root)
+                self._modules.append(_Module(name, candidate))
+            if not self._modules:
+                self._modules = [_Module('root', self.root)]
+            return True
         if os.path.isfile(os.path.join(self.root, 'go.mod')):
             self._modules = [_Module('root', self.root)]
             for entry in os.listdir(self.root):
@@ -144,12 +167,31 @@ class ProjectLayout:
     def _try_dart(self) -> bool:
         if os.path.isfile(os.path.join(self.root, 'pubspec.yaml')):
             self._modules = [_Module('root', self.root)]
+            seen = {self.root}
+            try:
+                with open(os.path.join(self.root, 'pubspec.yaml'), 'r',
+                          encoding='utf-8', errors='ignore') as f:
+                    pubspec = f.read()
+            except OSError:
+                pubspec = ''
+            workspace = re.search(
+                r'(?ms)^workspace\s*:\s*\n((?:^[ \t]+-\s*[^\n]+\n?)*)',
+                pubspec)
+            if workspace:
+                for raw in re.findall(r'(?m)^\s*-\s*([^#\s]+)', workspace.group(1)):
+                    candidate = os.path.abspath(os.path.join(self.root, raw.strip('"\'')))
+                    if (candidate not in seen
+                            and os.path.isfile(os.path.join(candidate, 'pubspec.yaml'))):
+                        seen.add(candidate)
+                        self._modules.append(_Module(
+                            os.path.relpath(candidate, self.root), candidate))
             packages_dir = os.path.join(self.root, 'packages')
             if os.path.isdir(packages_dir):
                 for entry in os.listdir(packages_dir):
                     candidate = os.path.join(packages_dir, entry)
-                    if os.path.isdir(candidate) and \
+                    if candidate not in seen and os.path.isdir(candidate) and \
                        os.path.isfile(os.path.join(candidate, 'pubspec.yaml')):
+                        seen.add(candidate)
                         self._modules.append(_Module(entry, candidate))
             return True
         return False
@@ -159,13 +201,59 @@ class ProjectLayout:
     def _try_maven(self) -> bool:
         if os.path.isfile(os.path.join(self.root, 'pom.xml')):
             self._modules = [_Module('root', self.root)]
+            try:
+                with open(os.path.join(self.root, 'pom.xml'), 'r',
+                          encoding='utf-8', errors='ignore') as f:
+                    pom = f.read()
+            except OSError:
+                pom = ''
+            seen = {self.root}
+            for raw in re.findall(r'<module>\s*([^<]+?)\s*</module>', pom):
+                candidate = os.path.abspath(os.path.join(self.root, raw.strip()))
+                if (candidate not in seen
+                        and os.path.isfile(os.path.join(candidate, 'pom.xml'))):
+                    seen.add(candidate)
+                    self._modules.append(_Module(raw.strip(), candidate))
             for entry in os.listdir(self.root):
                 candidate = os.path.join(self.root, entry)
-                if os.path.isdir(candidate) and \
+                if candidate not in seen and os.path.isdir(candidate) and \
                    os.path.isfile(os.path.join(candidate, 'pom.xml')):
+                    seen.add(candidate)
                     self._modules.append(_Module(entry, candidate))
             return True
         return False
+
+    # ── Swift Package Manager ─────────────────────────────────
+
+    def _try_swiftpm(self) -> bool:
+        manifest = os.path.join(self.root, 'Package.swift')
+        if not os.path.isfile(manifest):
+            return False
+        try:
+            with open(manifest, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+        except OSError:
+            self._modules = [_Module('root', self.root)]
+            return True
+
+        target_pattern = re.compile(
+            r'\.(target|executableTarget)\s*\(\s*name\s*:\s*"([^"]+)"'
+            r'(?P<body>.*?)(?=\n\s*\.(?:target|executableTarget|testTarget)\s*\(|\n\s*\]\s*\)|\Z)',
+            re.S)
+        seen: set[str] = set()
+        for match in target_pattern.finditer(content):
+            kind, name = match.group(1), match.group(2)
+            path_match = re.search(r'\bpath\s*:\s*"([^"]+)"', match.group('body'))
+            rel = path_match.group(1) if path_match else os.path.join('Sources', name)
+            candidate = os.path.abspath(os.path.join(self.root, rel))
+            if candidate in seen or not os.path.isdir(candidate):
+                continue
+            seen.add(candidate)
+            prefix = 'swiftpm:executable' if kind == 'executableTarget' else 'swiftpm:target'
+            self._modules.append(_Module(f'{prefix}:{name}', candidate))
+        if not self._modules:
+            self._modules = [_Module('root', self.root)]
+        return True
 
     # ── Xcode ─────────────────────────────────────────────────
 

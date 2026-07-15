@@ -320,6 +320,7 @@ def has_cross_file_refs(dm: dict, ref_index: dict, src_abs: str,
                         member_ref_index: dict[str, set[str]] | None = None,
                         type_ref_index: dict[str, set[str]] | None = None,
                         dynamic_ref_index: dict[str, set[str]] | None = None,
+                        implicit_ref_index: dict[tuple[str, str], set[str]] | None = None,
                         ) -> bool:
     """Return ``True`` if method *dm* has cross-file references.
 
@@ -359,6 +360,9 @@ def has_cross_file_refs(dm: dict, ref_index: dict, src_abs: str,
     check_property = prop_name is not None
 
     ref_files = set(ref_index.get(name, set()))
+    if implicit_ref_index is not None:
+        ext = os.path.splitext(dm.get('filepath', ''))[1].lower()
+        ref_files |= implicit_ref_index.get((ext, name), set())
     if check_property and prop_name != name:
         ref_files |= ref_index.get(prop_name, set())
 

@@ -14,6 +14,7 @@ PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_DIR)
 
 from pruner.analysis.project_boundary import detect_project_boundary  # noqa: E402
+from pruner.analysis.project_layout import ProjectLayout  # noqa: E402
 from pruner.config import load_boundary_options  # noqa: E402
 from pruner.steps.dead_methods import phase2_step2_cleanup_dead_declarations  # noqa: E402
 from pruner.steps.empty_cleanup import phase2_step5_cleanup_empty_artifacts  # noqa: E402
@@ -90,6 +91,92 @@ class ProjectBoundaryDetectionTests(unittest.TestCase):
             root = Path(tmp)
             (root / 'Dockerfile').write_text(
                 'FROM example.invalid/runtime\n', encoding='utf-8')
+            self.assertEqual('closed', detect_project_boundary(str(root)).world)
+
+    def test_go_workspace_maps_each_declared_module(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'go.mod').write_text(
+                'module example.invalid/workspace-root\n', encoding='utf-8')
+            (root / 'go.work').write_text(
+                'go 1.24\nuse (\n  ./services/api\n  ./libraries/core\n)\n',
+                encoding='utf-8')
+            for relative in ('services/api', 'libraries/core'):
+                module = root / relative
+                module.mkdir(parents=True)
+                (module / 'go.mod').write_text(
+                    f'module example.invalid/{relative}\n', encoding='utf-8')
+            layout = ProjectLayout(str(root))
+            self.assertEqual('go', layout.kind)
+            self.assertEqual('services/api', layout.get_module(
+                str(root / 'services/api/main.go')))
+            self.assertEqual('libraries/core', layout.get_module(
+                str(root / 'libraries/core/core.go')))
+
+    def test_dart_workspace_maps_declared_packages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'pubspec.yaml').write_text(
+                'name: workspace\nworkspace:\n  - packages/api\n',
+                encoding='utf-8')
+            package = root / 'packages/api'
+            package.mkdir(parents=True)
+            (package / 'pubspec.yaml').write_text(
+                'name: api\nresolution: workspace\n', encoding='utf-8')
+            layout = ProjectLayout(str(root))
+            self.assertEqual('dart', layout.kind)
+            self.assertEqual('packages/api', layout.get_module(
+                str(package / 'lib/api.dart')))
+
+    def test_maven_declared_nested_module_is_mapped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'pom.xml').write_text(
+                '<project><modules><module>services/api</module></modules></project>',
+                encoding='utf-8')
+            module = root / 'services/api'
+            module.mkdir(parents=True)
+            (module / 'pom.xml').write_text('<project/>', encoding='utf-8')
+            layout = ProjectLayout(str(root))
+            self.assertEqual('maven', layout.kind)
+            self.assertEqual('services/api', layout.get_module(
+                str(module / 'src/main/java/Api.java')))
+
+    def test_swiftpm_targets_have_independent_boundaries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'Package.swift').write_text(
+                '// swift-tools-version: 6.0\n'
+                'let package = Package(targets: [\n'
+                '  .target(name: "Core"),\n'
+                '  .executableTarget(name: "Tool")\n'
+                '])\n', encoding='utf-8')
+            for target in ('Core', 'Tool'):
+                (root / 'Sources' / target).mkdir(parents=True)
+            layout = ProjectLayout(str(root))
+            boundary = detect_project_boundary(str(root), layout=layout)
+            self.assertEqual('swiftpm', layout.kind)
+            self.assertEqual('open', boundary.world_for_file(
+                str(root / 'Sources/Core/Core.swift')))
+            self.assertEqual('closed', boundary.world_for_file(
+                str(root / 'Sources/Tool/main.swift')))
+
+    def test_swift_main_attribute_is_closed_world(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'Tool.swift').write_text(
+                '@main\nstruct Tool { static func main() {} }\n',
+                encoding='utf-8')
+            self.assertEqual('closed', detect_project_boundary(str(root)).world)
+
+    def test_unpublished_dart_cli_is_closed_world(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'pubspec.yaml').write_text(
+                'name: tool\npublish_to: none\n', encoding='utf-8')
+            (root / 'bin').mkdir()
+            (root / 'bin/tool.dart').write_text(
+                'void main(List<String> args) {}\n', encoding='utf-8')
             self.assertEqual('closed', detect_project_boundary(str(root)).world)
 
     def test_open_signal_wins_executable_signal(self):

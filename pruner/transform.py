@@ -37,7 +37,8 @@ def run_pipeline(cb: bytes, replacements=None, *, ext: str = '.java',
             cb = phase1_step1_replace_constants(cb, replacements, ext)
         cb = phase1_step2_propagate_local_constants(cb, ext)
         cb = phase1_step3_simplify_booleans(cb)
-        cb = phase1_step4_simplify_compound_expressions(cb)
+        cb = phase1_step4_simplify_compound_expressions(
+            cb, preserve_left_effects=ext not in ('.java', '.kt', '.kts'))
         if adapter:
             cb = adapter.phase1_step5_simplify_language_expressions(cb)
         cb = phase1_step6_eliminate_dead_branches(

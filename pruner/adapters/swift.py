@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 
 from .base import BaseAdapter
+from .callable_refs import CALLABLE_VALUE_PATTERNS
 from .contract_utils import declared_bodies, split_type_list
 
 _PROTECTED_NAMES: frozenset[str] = frozenset({
@@ -71,6 +72,10 @@ class SwiftAdapter(BaseAdapter):
     @property
     def local_boolean_patterns(self):
         return (_LOCAL_BOOL,)
+
+    @property
+    def implicit_reference_patterns(self):
+        return CALLABLE_VALUE_PATTERNS
 
     @property
     def field_node_types(self) -> frozenset[str]:

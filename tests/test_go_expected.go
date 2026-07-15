@@ -62,13 +62,13 @@ func case2_5() {
 func case3_1() {
 }
 
-func case3_2() { b := false; _ = b }
+func case3_2() { b := isChinese() && false; _ = b }
 
 func case3_3() {
 	doSomething()
 }
 
-func case3_4() { b := true; _ = b }
+func case3_4() { b := someCondition() || true; _ = b }
 
 func case3_7() {
 }
@@ -408,7 +408,7 @@ func case18_1() bool {
 	if debugBuild && debugFlag {
 		return true
 	}
-	return false
+	return isReady() && false
 }
 
 // ============================================================

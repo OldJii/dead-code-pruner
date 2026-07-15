@@ -190,3 +190,15 @@ class BaseAdapter(ABC):
         Every pattern must expose the referenced callable name as group 1.
         """
         return ()
+
+    @property
+    def implicit_reference_patterns(self) -> tuple[Pattern[str], ...]:
+        """Language-only callable-value forms not covered by call syntax.
+
+        Swift, Dart, and Go can pass a function or method without invoking it,
+        for example ``let callback = helper``.  Every pattern must expose the
+        referenced callable name as group 1.  The shared scanner keeps these
+        references in a language-keyed index so they cannot affect another
+        language's deletion decisions.
+        """
+        return ()

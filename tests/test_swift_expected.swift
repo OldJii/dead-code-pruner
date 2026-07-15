@@ -54,11 +54,11 @@ func case2_5() { alive() }
 func case3_1() {
 }
 
-func case3_2() { let b = false }
+func case3_2() { let b = isChinese() && false }
 
 func case3_3() { doSomething() }
 
-func case3_4() { let b = true }
+func case3_4() { let b = someCondition() || true }
 
 func case3_7() {
 }
@@ -299,14 +299,15 @@ func case18_1() -> Bool {
     if debugBuild && debugFlag {
         return true
     }
-    return false
+    return isReady() && false
 }
 
 func case18_4() {
     for i in 0..<10 {
         process(i)
     }
-    _ = false
+    let result = compute() && false
+    _ = result
 }
 
 // ============================================================

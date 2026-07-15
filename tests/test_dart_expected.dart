@@ -158,9 +158,9 @@ void case9_2() {
 // ============================================================
 
 void case10_1() { if (someCondition()) { doSomething(); } }
-void case10_2() { var b = isChinese; }
+void case10_2() { var b = isChinese(); }
 void case10_3() { if (someCondition()) { doSomething(); } }
-void case10_4() { var b = someCondition; }
+void case10_4() { var b = someCondition(); }
 void case10_5() { var s = "primary"; }
 
 // ============================================================
