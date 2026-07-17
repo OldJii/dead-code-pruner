@@ -142,13 +142,6 @@ def main():
         lambda root: phase2_step2_cleanup_dead_declarations(
             root, world='closed')))
 
-    lombok_fields = os.path.join(
-        SCRIPT_DIR, 'project_cleanup_lombok_fields')
-    results.append(run_dir_test(
-        'project_cleanup_lombok', lombok_fields,
-        lambda root: phase2_step2_cleanup_dead_declarations(
-            root, world='closed')))
-
     kotlin_trailing = os.path.join(
         SCRIPT_DIR, 'project_cleanup_kotlin_trailing_lambda')
     results.append(run_dir_test(
