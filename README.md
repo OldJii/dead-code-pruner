@@ -94,7 +94,26 @@ replacements:
     value: false
   - pattern: "BuildConfig.CURRENT_VARIANT"
     value: true
+
+# Java method calls are matched as invocation AST nodes, not text. The
+# receiver and optional arity prevent unrelated overloads from matching.
+method_replacements:
+  - method: "chatInteractionModeGrayConfig.hit"
+    arity: 1
+    value: true
 ```
+
+Method-call rules never rewrite declarations. By default they also skip a
+call when removing it would discard a nested call, assignment, object
+creation, update, lambda, or array access from its receiver or arguments.
+Use `discard_side_effects: true` only when that behavior is intentional.
+Unqualified method names are rejected unless the rule explicitly sets
+`allow_unqualified: true`.
+
+The same opt-in is required for unqualified, non-constant symbol names such
+as `enable`. Uppercase constant names such as `FEATURE_FLAG` remain supported
+without it. This prevents a configuration-field default from accidentally
+rewriting every same-named local or member across a service repository.
 
 Run the cleanup against a project directory:
 

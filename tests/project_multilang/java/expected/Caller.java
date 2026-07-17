@@ -8,9 +8,7 @@ public class Caller {
   }
 
   void multiline(boolean flag) {
-    boolean isOneWay =
-        false;
-    use(isOneWay);
+    use(false);
   }
 
   void use(boolean b) { System.out.println(b); }

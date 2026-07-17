@@ -20,3 +20,13 @@ replacements:
     value: false
   # - pattern: "cfg.enable_old_ui"
   #   value: false
+
+# Java invocation rules are explicit and AST-matched. Qualify the receiver
+# whenever possible; unqualified names require allow_unqualified: true.
+method_replacements:
+  - method: "featureConfig.isEnabled"
+    arity: 1
+    value: false
+    # Calls nested in the receiver/arguments are preserved by default.
+    # Set this only when intentionally discarding those side effects:
+    # discard_side_effects: true

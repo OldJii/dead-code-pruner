@@ -1061,7 +1061,7 @@ public class TestAllCases {
     System.out.println(result);
   }
 
-  // Case 24.3: 非 final 不应传播（可能被重新赋值）
+  // Case 24.3: 未重新赋值的局部变量按 effectively-final 传播
   void case24_3() {
     boolean mutable = BuildConfig.IS_PRODUCTION;
     if (mutable) {

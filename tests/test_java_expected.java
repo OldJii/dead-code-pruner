@@ -549,8 +549,7 @@ public class TestAllCases {
 
   // Case 15.5: 赋值 = 应该作为边界
   void case15_5() {
-    boolean result = false;
-    use(result);
+    use(false);
   }
 
   // Case 15.6: 复合赋值 += 也应该作为边界
@@ -765,7 +764,6 @@ public class TestAllCases {
     for (int i = 0; i < 10; i++) {
       process(i);
     }
-    boolean result = false;
   }
 
   // ============================================================
@@ -886,12 +884,9 @@ public class TestAllCases {
     System.out.println(result);
   }
 
-  // Case 24.3: 非 final 不应传播（可能被重新赋值）
+  // Case 24.3: 未重新赋值的局部变量按 effectively-final 传播
   void case24_3() {
-    boolean mutable = true;
-    if (mutable) {
-      doPrimary();
-    }
+    doPrimary();
   }
 }
 

@@ -6,8 +6,6 @@ convergence loop.
 """
 
 import os
-import yaml
-
 from . import lang as _lang
 from . import ui
 from .steps.constant_fold import (
@@ -21,6 +19,7 @@ from .steps.if_blocks import phase1_step6_eliminate_dead_branches
 from .steps.unreachable import phase1_step7_remove_unreachable_code
 from .adapters import get_adapter
 from .validation import validate_transformation
+from .config import load_replacement_rules
 
 
 def run_pipeline(cb: bytes, replacements=None, *, ext: str = '.java',
@@ -50,7 +49,7 @@ def run_pipeline(cb: bytes, replacements=None, *, ext: str = '.java',
     return validate_transformation(original, cb, ext)
 
 
-def load_config(path: str) -> list[tuple[str, str]]:
+def load_config(path: str):
     """Load a ``pruner.yaml`` config and return ``[(pattern, replacement), …]``.
 
     Supports two formats:
@@ -65,26 +64,7 @@ def load_config(path: str) -> list[tuple[str, str]]:
           - pattern: "FEATURE_FLAG"
             value: true
     """
-    with open(path, 'r') as f:
-        data = yaml.safe_load(f)
-    if not data:
-        return []
-    replacements: list[tuple[str, str]] = []
-    if 'replacements' in data and isinstance(data['replacements'], list):
-        for item in data['replacements']:
-            pat = item.get('pattern', '')
-            val = item.get('value', '')
-            if isinstance(val, bool):
-                val = 'true' if val else 'false'
-            replacements.append((str(pat), str(val)))
-    else:
-        for key, val in data.items():
-            if key == 'project_boundary':
-                continue
-            if isinstance(val, bool):
-                val = 'true' if val else 'false'
-            replacements.append((key, str(val)))
-    return replacements
+    return load_replacement_rules(path)
 
 
 def process_file(filepath: str, replacements: list[tuple[str, str]]) -> bool:

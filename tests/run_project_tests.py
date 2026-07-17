@@ -135,6 +135,13 @@ def main():
         lambda root: phase2_step2_cleanup_dead_declarations(
             root, world='closed')))
 
+    java_server_contracts = os.path.join(
+        SCRIPT_DIR, 'project_cleanup_java_server_contracts')
+    results.append(run_dir_test(
+        'project_cleanup_java_server_contracts', java_server_contracts,
+        lambda root: phase2_step2_cleanup_dead_declarations(
+            root, world='closed')))
+
     receiver_refs = os.path.join(
         SCRIPT_DIR, 'project_cleanup_receiver_refs')
     results.append(run_dir_test(

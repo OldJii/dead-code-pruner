@@ -14,6 +14,7 @@ PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_DIR)
 
 from pruner.analysis.method_scanner import scan_method_definitions
+from pruner.config import ReplacementRule
 from pruner.analysis.project_scan import scan_project
 from pruner.pipeline import run_full_pipeline
 from pruner.steps.constant_fold import phase1_step1_replace_constants
@@ -22,7 +23,8 @@ from pruner.steps.dead_methods import (
     phase2_step2_cleanup_dead_declarations,
 )
 from pruner.steps.method_inline import inline_boolean_methods_standalone
-from pruner.transform import run_pipeline
+from pruner.transform import load_config, run_pipeline
+from pruner.validation import validate_transformation
 
 
 SCANNER_CASES = {
@@ -117,6 +119,77 @@ PROJECT_CASES = {
 
 
 class LanguageParityTests(unittest.TestCase):
+    def test_java_semantic_gate_rejects_empty_nonvoid_method_body(self):
+        original = (
+            'enum Status { DONE; boolean terminal() { return this == DONE; } }'
+        ).encode()
+        broken = 'enum Status { DONE; boolean terminal() { } }'.encode()
+        self.assertEqual(
+            original, validate_transformation(original, broken, '.java'))
+
+    def test_java_method_rule_rewrites_only_safe_invocations_and_cascades(self):
+        source = (
+            'class Screen {\n'
+            '  String render(String userId) {\n'
+            '    boolean hit = config.hit(userId);\n'
+            '    String text = hit ? selected() : fallback();\n'
+            '    return text;\n'
+            '  }\n'
+            '  boolean hit(String userId) { return false; }\n'
+            '}\n').encode()
+        rule = ReplacementRule(
+            'config.hit', 'true', 'method_call', arity=1)
+        actual = run_pipeline(source, [rule], ext='.java').decode()
+        self.assertNotIn('config.hit(userId)', actual)
+        self.assertNotIn('boolean hit = true', actual)
+        self.assertIn('String text = selected();', actual)
+        self.assertIn('boolean hit(String userId)', actual)
+
+    def test_java_method_rule_preserves_nested_argument_side_effects(self):
+        source = (
+            'class Screen { boolean render() { '
+            'return config.hit(loadUser()); } }').encode()
+        safe = ReplacementRule('config.hit', 'true', 'method_call', arity=1)
+        forced = ReplacementRule(
+            'config.hit', 'true', 'method_call', arity=1,
+            discard_side_effects=True)
+        self.assertEqual(source, run_pipeline(source, [safe], ext='.java'))
+        self.assertNotIn(
+            'loadUser()', run_pipeline(source, [forced], ext='.java').decode())
+
+    def test_effectively_final_java_boolean_is_not_propagated_after_reassign(self):
+        source = (
+            'class Screen { boolean render(boolean enabled) {\n'
+            '  boolean hit = true;\n'
+            '  hit = enabled;\n'
+            '  return hit;\n'
+            '} }\n').encode()
+        self.assertEqual(source, run_pipeline(source, [], ext='.java'))
+
+    def test_method_rule_config_requires_explicit_unqualified_opt_in(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / 'pruner.yaml'
+            config.write_text(
+                'method_replacements:\n'
+                '  - method: "config.hit"\n'
+                '    arity: 1\n'
+                '    value: true\n', encoding='utf-8')
+            rules = load_config(str(config))
+            self.assertEqual('method_call', rules[0].kind)
+            self.assertEqual(1, rules[0].arity)
+            config.write_text(
+                'method_replacements:\n'
+                '  - method: hit\n'
+                '    value: true\n', encoding='utf-8')
+            with self.assertRaisesRegex(ValueError, 'allow_unqualified'):
+                load_config(str(config))
+            config.write_text(
+                'replacements:\n'
+                '  - pattern: enable\n'
+                '    value: false\n', encoding='utf-8')
+            with self.assertRaisesRegex(ValueError, 'non-constant symbol'):
+                load_config(str(config))
+
     def test_scanner_detects_constant_methods_and_exact_arity(self):
         for ext, source in SCANNER_CASES.items():
             with self.subTest(ext=ext):

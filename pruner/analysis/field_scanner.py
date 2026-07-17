@@ -239,6 +239,15 @@ def scan_fields(filepath: str, cb: bytes, ext: str,
                         'final', bool(mods & {'final', 'const', 'val', 'let'})),
                     'all_mods': mods,
                     'has_annotation': has_annotation,
+                    'has_implicit_reference': (
+                        adapter.field_is_implicitly_referenced(node, cb, name)
+                        if adapter else False),
+                    'has_generated_api': (
+                        adapter.field_exposes_generated_api(node, cb, name)
+                        if adapter else False),
+                    'initializer_has_effects': (
+                        adapter.field_initializer_has_effects(node, cb, name)
+                        if adapter else False),
                     'decl_start': byte_to_line(line_offsets, start),
                     'decl_end': byte_to_line(line_offsets, span_end),
                     'start_byte': start,

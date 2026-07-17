@@ -377,8 +377,10 @@ def run_full_pipeline(
                 ui.info(f"         {module.name}: {module.world} ({reason})")
     ui.kv("Config", config_path)
     ui.kv("Rules", f"{len(replacements)} replacement(s)")
-    for p, v in replacements:
-        ui.info(f"         {p} → {v}")
+    for rule in replacements:
+        p, v = rule
+        suffix = " [method call]" if getattr(rule, 'kind', '') == 'method_call' else ''
+        ui.info(f"         {p} → {v}{suffix}")
     ui.kv("Languages", ', '.join(sorted(SUPPORTED_EXTS)))
     if phases:
         ui.kv("Phases", str(phases))

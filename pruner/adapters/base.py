@@ -70,6 +70,30 @@ class BaseAdapter(ABC):
         """
         return frozenset({name})
 
+    def field_is_implicitly_referenced(self, declaration, content: bytes,
+                                       name: str) -> bool:
+        """Whether generated code or a runtime contract consumes a field.
+
+        This is deliberately separate from declaration annotations.  A field
+        can be unannotated while its enclosing type generates a constructor,
+        participates in serialization, or is populated through reflection.
+        """
+        return False
+
+    def field_exposes_generated_api(self, declaration, content: bytes,
+                                    name: str) -> bool:
+        """Whether the field produces an externally callable generated API.
+
+        Open-world modules must preserve these fields even when the generated
+        accessor is absent from source and therefore cannot be indexed.
+        """
+        return False
+
+    def field_initializer_has_effects(self, declaration, content: bytes,
+                                      name: str) -> bool:
+        """Whether deleting the declaration may drop observable evaluation."""
+        return False
+
     def field_declaration_span(self, declaration, content: bytes) -> tuple[int, int]:
         """Return byte bounds for the complete removable declaration."""
         return declaration.start_byte, declaration.end_byte

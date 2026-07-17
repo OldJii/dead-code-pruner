@@ -630,7 +630,8 @@ def _cleanup_unused_fields(scan: ProjectScanResult,
     candidate_fields: list[dict] = []
     candidate_names: set[str] = set()
     for f in fresh_fields:
-        if f.get('has_annotation'):
+        if (f.get('has_annotation') or f.get('has_implicit_reference')
+                or f.get('initializer_has_effects')):
             continue
         if not f.get('is_final'):
             continue
@@ -642,6 +643,10 @@ def _cleanup_unused_fields(scan: ProjectScanResult,
                          and boundary.allows_external_api_pruning(f['filepath'])
                          and (f.get('is_static')
                               or f.get('class_name') is None))):
+            continue
+        if (f.get('has_generated_api')
+                and (boundary is None
+                     or not boundary.allows_external_api_pruning(f['filepath']))):
             continue
         candidate_fields.append(f)
         candidate_names.update(f.get('reference_names') or (f['name'],))

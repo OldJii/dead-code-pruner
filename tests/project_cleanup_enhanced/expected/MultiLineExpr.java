@@ -1,9 +1,7 @@
 public class MultiLineExpr {
 
   public void testMultiLineAssignment() {
-    boolean result =
-        false;
-    doSomething(result);
+    doSomething(false);
   }
 
   public void testStandaloneCall() {
