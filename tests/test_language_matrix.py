@@ -119,6 +119,34 @@ PROJECT_CASES = {
 
 
 class LanguageParityTests(unittest.TestCase):
+    def test_java_field_default_is_not_treated_as_a_global_replacement(self):
+        source = (
+            'class AdPreloadConfig {\n'
+            '  private boolean enable = false;\n'
+            '  boolean needPreload(boolean whitelistHit) {\n'
+            '    return enable || whitelistHit;\n'
+            '  }\n'
+            '}\n').encode()
+        self.assertEqual(source, run_pipeline(source, [], ext='.java'))
+
+    def test_java_cleanup_does_not_partially_empty_nested_if_body(self):
+        source = (
+            'class Settings {\n'
+            '  int innerThoughtShouldSetRedDot(String userId, long max) {\n'
+            '    try {\n'
+            '      long now = System.currentTimeMillis() / 1000;\n'
+            '      if (now < max) {\n'
+            '        long exposure = dao.getRedDotExposure(userId);\n'
+            '        return exposure == 0L ? 1 : 0;\n'
+            '      }\n'
+            '      return 0;\n'
+            '    } catch (Exception e) {\n'
+            '      return 0;\n'
+            '    }\n'
+            '  }\n'
+            '}\n').encode()
+        self.assertEqual(source, run_pipeline(source, [], ext='.java'))
+
     def test_java_semantic_gate_rejects_empty_nonvoid_method_body(self):
         original = (
             'enum Status { DONE; boolean terminal() { return this == DONE; } }'

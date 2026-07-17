@@ -7,6 +7,8 @@ import re
 from .base import BaseAdapter
 from .contract_utils import declared_bodies, split_type_list
 from .jvm_common import JVM_PROTECTED_NAMES
+from .java_calls import replace_configured_calls
+from .java_validation import preserves_method_results
 from ..ast_utils import find_all, txt
 
 _LOCAL_BOOL = re.compile(
@@ -123,6 +125,40 @@ class JavaAdapter(BaseAdapter):
     @property
     def local_boolean_patterns(self):
         return (_LOCAL_BOOL,)
+
+    def local_boolean_is_propagatable(
+            self, root, content: bytes, name: bytes, declaration_start: int,
+            declaration_end: int, scope_end: int) -> bool:
+        current = root.descendant_for_byte_range(
+            declaration_start, declaration_end)
+        in_callable = False
+        while current is not None:
+            if current.type == 'field_declaration':
+                break
+            if current.type in (
+                    'method_declaration', 'function_declaration',
+                    'function_definition', 'method_definition',
+                    'constructor_declaration', 'init_declaration'):
+                in_callable = True
+                break
+            current = current.parent
+        if not in_callable:
+            return False
+
+        # Java locals need not be explicitly final. They are safe to
+        # propagate only when no later assignment/update exists in scope.
+        tail = content[declaration_end:scope_end]
+        escaped = re.escape(name)
+        return not (
+            re.search(rb'\b' + escaped + rb'\s*(?:[+\-*/%&|^]?=|\+\+|--)', tail)
+            or re.search(rb'(?:\+\+|--)\s*' + escaped + rb'\b', tail))
+
+    def replace_configured_calls(self, content: bytes, rules: list) -> bytes:
+        return replace_configured_calls(content, rules)
+
+    def preserves_transformation_semantics(
+            self, original: bytes, transformed: bytes) -> bool:
+        return preserves_method_results(original, transformed)
 
     def field_reference_names(self, declaration, content: bytes,
                               name: str) -> frozenset[str]:

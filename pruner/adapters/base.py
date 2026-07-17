@@ -113,10 +113,30 @@ class BaseAdapter(ABC):
         """Regexes for immutable local booleans, with name/value groups."""
         return ()
 
+    def local_boolean_is_propagatable(
+            self, root, content: bytes, name: bytes, declaration_start: int,
+            declaration_end: int, scope_end: int) -> bool:
+        """Whether a matched boolean is a local immutable/effectively-final value."""
+        return True
+
     def phase1_step5_simplify_language_expressions(
             self, content: bytes) -> bytes:
         """Apply syntax unique to this language before branch elimination."""
         return content
+
+    def replace_configured_calls(self, content: bytes, rules: list) -> bytes:
+        """Apply language-aware configured call replacements.
+
+        Call syntax and evaluation order are language contracts, so the
+        shared constant-folding step delegates the operation to adapters.
+        Unsupported languages conservatively leave the source unchanged.
+        """
+        return content
+
+    def preserves_transformation_semantics(
+            self, original: bytes, transformed: bytes) -> bool:
+        """Reject a syntactically valid transformation that breaks a language contract."""
+        return True
 
     def parameter_count(self, declaration, content: bytes) -> int | None:
         """Return source-level arity, or ``None`` for shared fallback logic."""

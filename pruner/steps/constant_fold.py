@@ -9,7 +9,7 @@ within the same file.
 import re
 
 from ..adapters import get_adapter
-from ..ast_utils import find_all, parse, replace_node, txt
+from ..ast_utils import parse
 from ..lang import _PARSERS
 
 _DECL_PREFIXES = (b'const ', b'var ', b'let ', b'val ', b'final ', b'#define ')
@@ -125,8 +125,9 @@ def phase1_step1_replace_constants(
         return cb
     method_rules = [rule for rule in replacements
                     if getattr(rule, 'kind', 'symbol') == 'method_call']
-    if method_rules and ext == '.java':
-        cb = _replace_java_method_calls(cb, method_rules)
+    adapter = get_adapter(ext)
+    if method_rules and adapter:
+        cb = adapter.replace_configured_calls(cb, method_rules)
     replacements = [rule for rule in replacements
                     if getattr(rule, 'kind', 'symbol') == 'symbol']
     if not replacements:
@@ -167,81 +168,6 @@ def _replace_configured_chunk(cb: bytes, replacements: list) -> bytes:
                     break
             if changed:
                 break
-    return cb
-
-
-_JAVA_EFFECTFUL_NODES = frozenset({
-    'assignment_expression', 'method_invocation', 'object_creation_expression',
-    'update_expression', 'lambda_expression', 'array_access',
-})
-
-
-def _java_expression_is_stable(node) -> bool:
-    """Whether dropping an expression cannot discard an obvious side effect.
-
-    This is intentionally conservative.  Method rules are commonly used for
-    remote/config gates, but replacing a call must not silently erase another
-    call nested in its receiver or arguments.
-    """
-    stack = [node]
-    while stack:
-        current = stack.pop()
-        if current.type in _JAVA_EFFECTFUL_NODES:
-            return False
-        stack.extend(current.named_children)
-    return True
-
-
-def _java_method_rule_matches(node, cb: bytes, rule) -> bool:
-    name_node = node.child_by_field_name('name')
-    args_node = node.child_by_field_name('arguments')
-    if name_node is None or args_node is None:
-        return False
-    pattern = rule.pattern
-    expected_receiver = None
-    expected_name = pattern
-    if '.' in pattern:
-        expected_receiver, expected_name = pattern.rsplit('.', 1)
-    if txt(name_node, cb) != expected_name:
-        return False
-    if rule.arity is not None and len(args_node.named_children) != rule.arity:
-        return False
-
-    receiver = node.child_by_field_name('object')
-    if expected_receiver is not None:
-        if receiver is None:
-            return False
-        actual_receiver = txt(receiver, cb).replace(' ', '')
-        normalized_expected = expected_receiver.replace(' ', '')
-        if (actual_receiver != normalized_expected
-                and not actual_receiver.endswith('.' + normalized_expected)):
-            return False
-    elif not rule.allow_unqualified:
-        return False
-
-    if rule.discard_side_effects:
-        return True
-    if receiver is not None and not _java_expression_is_stable(receiver):
-        return False
-    return all(_java_expression_is_stable(argument)
-               for argument in args_node.named_children)
-
-
-def _replace_java_method_calls(cb: bytes, rules: list) -> bytes:
-    """Replace matched Java invocation AST nodes, never declarations."""
-    for _ in range(500):
-        root, _ = parse(cb)
-        changed = False
-        for invocation in find_all(root, 'method_invocation'):
-            for rule in rules:
-                if _java_method_rule_matches(invocation, cb, rule):
-                    cb = replace_node(cb, invocation, rule.value)
-                    changed = True
-                    break
-            if changed:
-                break
-        if not changed:
-            return cb
     return cb
 
 
@@ -296,42 +222,23 @@ def _extract_scoped_bool_constants(
     code = _masked_code(cb, ext)
     parser = _PARSERS.get(ext)
     root = parser.parse(cb).root_node if parser is not None else None
+    adapter = get_adapter(ext)
     for pat in patterns:
         for m in pat.finditer(code):
             name = m.group(1)
             value = m.group(2)
             if name in _TYPE_NAMES:
                 continue
-            if root is not None and ext == '.java':
-                current = root.descendant_for_byte_range(m.start(), m.end())
-                in_callable = False
-                while current is not None:
-                    if current.type == 'field_declaration':
-                        break
-                    if current.type in (
-                            'method_declaration', 'function_declaration',
-                            'function_definition', 'method_definition',
-                            'constructor_declaration', 'init_declaration'):
-                        in_callable = True
-                        break
-                    current = current.parent
-                if not in_callable:
-                    continue
             scope_start, scope_end = _find_enclosing_scope(
                 cb, m.start(), ext, code)
             if scope_start < 0:
                 continue
             le = cb.find(b'\n', m.end())
             decl_end = le + 1 if le != -1 else m.end()
-            # Java locals need not be explicitly final to be effectively
-            # final.  Propagate them only when no later assignment/update is
-            # present in the enclosing scope.
-            if ext == '.java':
-                tail = code[decl_end:scope_end]
-                escaped = re.escape(name)
-                if (re.search(rb'\b' + escaped + rb'\s*(?:[+\-*/%&|^]?=|\+\+|--)', tail)
-                        or re.search(rb'(?:\+\+|--)\s*' + escaped + rb'\b', tail)):
-                    continue
+            if (adapter is not None and root is not None
+                    and not adapter.local_boolean_is_propagatable(
+                        root, code, name, m.start(), decl_end, scope_end)):
+                continue
             results.append((name, value, m.start(), decl_end, scope_start, scope_end))
     return results
 

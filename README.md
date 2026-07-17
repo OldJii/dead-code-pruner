@@ -125,7 +125,7 @@ Run it on a separate Git branch, inspect the resulting diff, and compile and tes
 
 ## Using It Outside Android
 
-The implementation includes language adapters and tests for Java, Kotlin, Go, Swift, and Dart, but its large-scale production use has so far been validated only on Android projects.
+The implementation includes language adapters and tests for Java, Kotlin, Go, Swift, and Dart. Android and a 5,000-file Java 21/Maven service repository are covered by real-project cleanup runs; repository-specific compilation still requires that repository's private parent POMs and dependency settings.
 
 For a non-Android repository, start with a fork. If a language construct is not handled correctly, use the failing source as a small reproducible fixture, ask an AI coding agent to analyze the AST or reference-resolution gap, and add an input/expected-output test before adjusting the adapter or cleanup rule. Once the new case and the existing suites all pass, the behavior is fixed as a repeatable rule and the cleanup can be applied to the target repository with confidence.
 
@@ -136,7 +136,15 @@ python3 tests/run_tests.py
 python3 tests/run_project_tests.py
 python3 tests/test_language_matrix.py
 python3 tests/test_project_boundary.py
+python3 tests/test_java_compile_regressions.py
 ```
+
+The Java compile regression first compiles a Lombok-based baseline project,
+runs the full pruner, and compiles the cleaned output with Maven/JDK 21. For a
+real Maven service, run the repository's own verification before and after
+cleanup, for example `mvn -T 1C test` (or its CI-equivalent profile). A build
+that cannot resolve a private parent POM is an environment failure, not a
+source-compilation result.
 
 ## How It Works
 
@@ -144,7 +152,15 @@ tree-sitter parses source files into syntax trees, allowing the tool to distingu
 
 The tool first simplifies each file from the configured boolean facts. It then builds project-level indexes for declarations, references, inheritance, contracts, generated accessors, and dynamic entry points. Only declarations with no remaining safe reference are removed. Modified files are analyzed again, allowing one deletion to expose the next until the project reaches a stable result.
 
-Language adapters supply the syntax and framework rules for each ecosystem, while project-boundary detection preserves externally visible APIs in libraries and permits broader cleanup in applications and deployed services.
+Language adapters own syntax, generated-code contracts, call rewriting, and
+semantic validation for each ecosystem. The shared pipeline only orchestrates
+those capabilities; it contains no Java method-matching or Java return-contract
+special cases. Project-boundary detection preserves externally visible APIs in
+libraries and permits broader cleanup in applications and deployed services.
+
+Large per-file passes use all available CPU cores through a process pool. The
+project graph is shared across cascade rounds so correctness indexes are not
+weakened for speed; changed files alone are refreshed between rounds.
 
 The main pipeline has two phases:
 
