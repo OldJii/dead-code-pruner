@@ -308,7 +308,8 @@ def run_phase_2(target: str, replacements: list, dry_run: bool, *,
 
     ui.info("Step 5 · Empty class and file cleanup")
     cleanup = phase2_step5_cleanup_empty_artifacts(
-        target, dry_run=dry_run, show_header=False, boundary=boundary)
+        target, dry_run=dry_run, show_header=False, boundary=boundary,
+        scan=scan)
     total += cleanup['classes_removed'] + cleanup['files_deleted']
 
     elapsed = time.time() - t0

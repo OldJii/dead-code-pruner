@@ -8,11 +8,13 @@ no code (only package/import declarations) are deleted.
 
 import os
 import re
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from ..ast_utils import parse, find_all_multi, txt, build_line_offsets, byte_to_line
 from ..lang import _PARSERS, SKIP_DIRS
 from .. import ui
 from ..analysis.ref_index import REFERENCE_EXTS
+from ..analysis.project_scan import ProjectScanResult
 from ..analysis.project_boundary import (
     ProjectBoundary, boundary_allows_record, detect_project_boundary,
 )
@@ -164,6 +166,39 @@ def _file_has_only_imports(content: str) -> bool:
     return True
 
 
+def _scan_empty_class_chunk(
+        file_paths: list[str]) -> list[tuple[str, str, int, int, set[str]]]:
+    """Parse one process-sized chunk and return structural empty-class facts."""
+    from .. import lang as _lang
+
+    candidates: list[tuple[str, str, int, int, set[str]]] = []
+    for fp in file_paths:
+        ext = os.path.splitext(fp)[1].lower()
+        try:
+            with open(fp, 'rb') as handle:
+                content = handle.read()
+        except Exception:
+            continue
+        _lang._current_ext = ext
+        root, _ = parse(content)
+        offsets = build_line_offsets(content)
+        for node in find_all_multi(root, _CLASS_NODE_TYPES):
+            if not _is_class_empty(node, content):
+                continue
+            name = _find_class_name(node, content)
+            if not name or _class_has_annotation(node):
+                continue
+            if node.parent and node.parent.type in _CLASS_NODE_TYPES:
+                continue
+            candidates.append((
+                fp, name,
+                byte_to_line(offsets, node.start_byte),
+                byte_to_line(offsets, node.end_byte),
+                _class_modifiers(node, content),
+            ))
+    return candidates
+
+
 def phase2_step5_cleanup_empty_artifacts(
     root_dir: str,
     dry_run: bool = False,
@@ -171,6 +206,7 @@ def phase2_step5_cleanup_empty_artifacts(
     show_header: bool = True,
     boundary: ProjectBoundary | None = None,
     world: str = 'auto',
+    scan: ProjectScanResult | None = None,
 ) -> dict:
     """Remove empty classes and delete empty files.
 
@@ -184,57 +220,58 @@ def phase2_step5_cleanup_empty_artifacts(
         ui.stage("Cleaning empty classes and files")
     boundary = boundary or detect_project_boundary(root_dir, mode=world)
 
-    source_files: list[str] = []
-    reference_files: list[str] = []
-    for dp, dns, fns in os.walk(root_dir):
-        dns[:] = [d for d in dns if d not in SKIP_DIRS]
-        for fn in fns:
-            ext = os.path.splitext(fn)[1].lower()
-            if ext in _PARSERS:
-                fp = os.path.join(dp, fn)
-                source_files.append(fp)
-                reference_files.append(fp)
-            elif ext in REFERENCE_EXTS:
-                reference_files.append(os.path.join(dp, fn))
+    if scan is not None:
+        source_files = [fp for fp in scan.all_files if os.path.exists(fp)]
+        reference_files = [fp for fp in scan.ref_files if os.path.exists(fp)]
+    else:
+        source_files = []
+        reference_files = []
+        for dp, dns, fns in os.walk(root_dir):
+            dns[:] = [d for d in dns if d not in SKIP_DIRS]
+            for fn in fns:
+                ext = os.path.splitext(fn)[1].lower()
+                if ext in _PARSERS:
+                    fp = os.path.join(dp, fn)
+                    source_files.append(fp)
+                    reference_files.append(fp)
+                elif ext in REFERENCE_EXTS:
+                    reference_files.append(os.path.join(dp, fn))
+
+    structural_candidates: list[tuple[str, str, int, int, set[str]]] = []
+    total_files = len(source_files)
+    n_workers = min(os.cpu_count() or 1, max(1, total_files // 200))
+    if n_workers > 1 and total_files >= 500:
+        chunk_count = min(total_files, n_workers * 8)
+        chunk_size = max(1, (total_files + chunk_count - 1) // chunk_count)
+        chunks = [source_files[i:i + chunk_size]
+                  for i in range(0, total_files, chunk_size)]
+        completed = 0
+        try:
+            with ProcessPoolExecutor(max_workers=n_workers) as executor:
+                futures = {
+                    executor.submit(_scan_empty_class_chunk, chunk): len(chunk)
+                    for chunk in chunks
+                }
+                for future in as_completed(futures):
+                    structural_candidates.extend(future.result())
+                    completed += futures[future]
+                    ui.progress(completed, total_files,
+                                "Scanning for empty classes")
+        except Exception as exc:
+            ui.progress_done()
+            ui.warn(f"Parallel empty-class scan failed ({exc}), falling back")
+            structural_candidates = _scan_empty_class_chunk(source_files)
+            ui.progress(total_files, total_files, "Scanning for empty classes")
+    else:
+        structural_candidates = _scan_empty_class_chunk(source_files)
+        ui.progress(total_files, total_files, "Scanning for empty classes")
+    ui.progress_done()
 
     empty_classes: list[tuple[str, str, int, int]] = []
-    total_files = len(source_files)
-    for idx, fp in enumerate(source_files):
-        ui.progress(idx + 1, total_files, "Scanning for empty classes")
-        ext = os.path.splitext(fp)[1].lower()
-        try:
-            with open(fp, 'rb') as f:
-                cb = f.read()
-        except Exception:
-            continue
-
-        from .. import lang as _lang
-        _lang._current_ext = ext
-        root, _ = parse(cb)
-        line_offsets = build_line_offsets(cb)
-
-        for node in find_all_multi(root, _CLASS_NODE_TYPES):
-                if not _is_class_empty(node, cb):
-                    continue
-                name = _find_class_name(node, cb)
-                if not name:
-                    continue
-                if _class_has_annotation(node):
-                    continue
-                record = {
-                    'name': name,
-                    'filepath': fp,
-                    'all_mods': _class_modifiers(node, cb),
-                }
-                if not boundary_allows_record(record, boundary):
-                    continue
-                if node.parent and node.parent.type in _CLASS_NODE_TYPES:
-                    continue
-
-                start_line = byte_to_line(line_offsets, node.start_byte)
-                end_line = byte_to_line(line_offsets, node.end_byte)
-                empty_classes.append((fp, name, start_line, end_line))
-    ui.progress_done()
+    for fp, name, start_line, end_line, modifiers in structural_candidates:
+        record = {'name': name, 'filepath': fp, 'all_mods': modifiers}
+        if boundary_allows_record(record, boundary):
+            empty_classes.append((fp, name, start_line, end_line))
 
     if not empty_classes:
         ui.info("No empty classes found.")
@@ -244,21 +281,28 @@ def phase2_step5_cleanup_empty_artifacts(
 
     # Build a lightweight ref_index for class name lookups.
     class_names_needed = {cn for _, cn, _, _ in empty_classes}
-    class_ref_index: dict[str, set[str]] = {}
-    cn_pat = re.compile(
-        r'\b(' + '|'.join(re.escape(n) for n in class_names_needed) + r')\b')
-    total_reference_files = len(reference_files)
-    for idx, fp in enumerate(reference_files):
-        ui.progress(idx + 1, total_reference_files,
-                    "Indexing empty-class references")
-        try:
-            with open(fp, 'r', encoding='utf-8', errors='ignore') as f:
-                content = f.read()
-        except Exception:
-            continue
-        for m in cn_pat.finditer(content):
-            class_ref_index.setdefault(m.group(1), set()).add(fp)
-    ui.progress_done()
+    if scan is not None:
+        class_ref_index = {
+            name: set(scan.ref_index.get(name, set()))
+            for name in class_names_needed
+        }
+        ui.info("Reusing unified project reference index")
+    else:
+        class_ref_index: dict[str, set[str]] = {}
+        cn_pat = re.compile(
+            r'\b(' + '|'.join(re.escape(n) for n in class_names_needed) + r')\b')
+        total_reference_files = len(reference_files)
+        for idx, fp in enumerate(reference_files):
+            ui.progress(idx + 1, total_reference_files,
+                        "Indexing empty-class references")
+            try:
+                with open(fp, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read()
+            except Exception:
+                continue
+            for m in cn_pat.finditer(content):
+                class_ref_index.setdefault(m.group(1), set()).add(fp)
+        ui.progress_done()
 
     classes_removed = 0
     files_to_check: set[str] = set()
