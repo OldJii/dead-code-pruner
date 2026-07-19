@@ -11,7 +11,6 @@ Usage:
 """
 
 import argparse
-import json
 import os
 import re
 import signal
@@ -941,40 +940,9 @@ def print_summary(results: list[ValidationResult]):
 
 
 def generate_reports(results: list[ValidationResult]):
-    """Generate JSON and Markdown reports from validation results."""
+    """Generate the human-readable Markdown validation report."""
     docs_dir = PRUNER_ROOT / "docs"
     docs_dir.mkdir(parents=True, exist_ok=True)
-
-    json_data = []
-    for r in results:
-        steps_data = [
-            {
-                "name": s.name,
-                "passed": s.passed,
-                "command": s.command,
-                "exit_code": s.exit_code,
-                "elapsed": round(s.elapsed, 2),
-                "log": s.log,
-                "reason": s.reason,
-            }
-            for s in r.steps
-        ]
-        json_data.append({
-            "project": r.project,
-            "world": r.world,
-            "passed": r.passed,
-            "baseline_failures": sorted(r.baseline_failures),
-            "file_count": r.file_count,
-            "steps": steps_data,
-            "fixture_removals": r.fixture_removals,
-            "fixture_preserved": r.fixture_preserved,
-            "non_fixture_diff": r.non_fixture_diff,
-            "api_diff": r.api_diff,
-            "errors": r.errors,
-        })
-
-    json_path = docs_dir / "validation_results.json"
-    json_path.write_text(json.dumps(json_data, indent=2), encoding='utf-8')
 
     md_lines = ["# Real-World Project Validation Report\n"]
     md_lines.append(f"Generated from `scripts/validate_real_projects.py`.\n")
@@ -1054,8 +1022,7 @@ def generate_reports(results: list[ValidationResult]):
     md_path = docs_dir / "REAL_WORLD_VALIDATION.md"
     md_path.write_text("\n".join(md_lines), encoding='utf-8')
 
-    print(f"\n  Reports generated:")
-    print(f"    {json_path}")
+    print(f"\n  Report generated:")
     print(f"    {md_path}")
 
 
