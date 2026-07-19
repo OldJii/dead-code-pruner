@@ -72,6 +72,10 @@ def process_file(filepath: str, replacements: list[tuple[str, str]]) -> bool:
     ext = os.path.splitext(filepath)[1].lower()
     if ext not in _lang._PARSERS:
         return False
+    from .adapters import get_adapter
+    adapter = get_adapter(ext)
+    if adapter and adapter.is_generated_source(filepath):
+        return False
     try:
         with open(filepath, 'rb') as f:
             cb = f.read()

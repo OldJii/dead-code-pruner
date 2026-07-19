@@ -43,6 +43,24 @@ _SKIP_CHILD_TYPES = frozenset({
     '{', '}',
 })
 
+# Swift/C preprocessor directives (#if, #else, #endif, #elseif) are
+# compile-time constructs.  They appear as siblings of runtime statements
+# in the AST, but removing them would break cross-platform compilation.
+_DIRECTIVE_TYPES = frozenset({'directive'})
+
+def _swift_bare_return_may_have_value(node) -> bool:
+    """Use the enclosing signature to disambiguate ``return\n expression``."""
+    current = node.parent
+    while current is not None:
+        if current.type == 'function_declaration':
+            return any(child.type == '->' for child in current.children)
+        if current.type == 'computed_property':
+            return True
+        if current.type in ('lambda_literal', 'closure_expression'):
+            return True
+        current = current.parent
+    return False
+
 
 def _is_exit(node, cb: bytes) -> bool:
     """Return True if *node* is an unconditional exit statement."""
@@ -53,10 +71,25 @@ def _is_exit(node, cb: bytes) -> bool:
             return stripped.startswith(b'return') or stripped.startswith(b'throw')
         if node.type == 'control_transfer_statement':
             stripped = text.strip()
-            return (stripped.startswith(b'return')
+            if not (stripped.startswith(b'return')
                     or stripped.startswith(b'throw')
                     or stripped.startswith(b'break')
-                    or stripped.startswith(b'continue'))
+                    or stripped.startswith(b'continue')):
+                return False
+            if stripped == b'return' and node.parent is not None:
+                siblings = [
+                    c for c in node.parent.children
+                    if c.type not in _SKIP_CHILD_TYPES
+                    and c.type not in _DIRECTIVE_TYPES
+                ]
+                idx = next(
+                    (i for i, s in enumerate(siblings) if s.id == node.id),
+                    -1,
+                )
+                if idx >= 0 and idx + 1 < len(siblings):
+                    if _swift_bare_return_may_have_value(node):
+                        return False
+            return True
         return True
     if node.type in ('identifier', 'simple_identifier'):
         text = cb[node.start_byte:node.end_byte]
@@ -129,6 +162,13 @@ def _collect_dead_ranges(root, cb: bytes) -> list[tuple[int, int]]:
         dead_start = -1
         dead_end = -1
         for child in children:
+            if child.type in _DIRECTIVE_TYPES:
+                if dead_start >= 0 and dead_end > dead_start:
+                    ranges.append((dead_start, dead_end))
+                found_exit = False
+                dead_start = -1
+                dead_end = -1
+                continue
             if found_exit:
                 if dead_start < 0:
                     dead_start = child.start_byte

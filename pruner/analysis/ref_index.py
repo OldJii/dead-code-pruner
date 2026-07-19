@@ -12,7 +12,7 @@ from .. import ui
 from .text_index import TextIndex
 
 
-REFERENCE_EXTS = frozenset({'.xml', '.json'}).union(*(
+REFERENCE_EXTS = frozenset({'.xml', '.json', '.sh'}).union(*(
     adapter.reference_file_extensions for adapter in all_adapters()))
 
 _CALL_PAT = re.compile(r'\b(\w+)\s*\(')
@@ -31,6 +31,13 @@ _QUOTED_IDENTIFIER_PAT = re.compile(
     r'''(?x)
     (?:"((?:[A-Za-z_]\w*))"|'((?:[A-Za-z_]\w*))')
     ''')
+# JVM annotation arguments referencing methods by string.  Covers JUnit 5
+# (@EnabledIf, @DisabledIf, @MethodSource, @ValueSource), Spring, etc.
+ANNOTATION_STRING_REF_PATTERN = re.compile(
+    r'@\w+\s*\(\s*(?:value\s*=\s*)?["\']([A-Za-z_]\w*)["\']')
+_SED_SYMBOL_REPLACEMENT_PAT = re.compile(
+    r'(?<!\w)s(?P<delimiter>[/|#])([A-Za-z_]\w*)'
+    r'(?P=delimiter)([A-Za-z_]\w*)(?P=delimiter)[A-Za-z]*')
 
 # Content-keyed cache.  Do NOT key by id(content) alone — CPython reuses
 # object ids after GC, which would return a stale TextIndex for a new string.
@@ -88,15 +95,15 @@ def iter_reference_names(content: str, *,
         for m in _DOT_PROPERTY_PAT.finditer(content):
             yield m.group(1)
     if 'import ' in content:
-        # An unused static/Kotlin import still has to resolve at compile
-        # time.  Index the imported terminal symbol even when no call
-        # remains after constant folding.
         for m in _IMPORT_SYMBOL_PAT.finditer(content):
+            yield m.group(1)
+    if '@' in content:
+        for m in ANNOTATION_STRING_REF_PATTERN.finditer(content):
             yield m.group(1)
 
 
 def iter_implicit_reference_names(content: str, ext: str):
-    """Yield callable-value references owned by the active language.
+    """Yield language-specific call and callable-value references.
 
     These names deliberately remain separate from the language-neutral call
     index.  A Swift callback named ``ready`` must not keep an unrelated Java,
@@ -105,7 +112,9 @@ def iter_implicit_reference_names(content: str, ext: str):
     adapter = get_adapter(ext)
     if adapter is None:
         return
-    for pattern in adapter.implicit_reference_patterns:
+    patterns = (adapter.implicit_call_patterns
+                + adapter.implicit_reference_patterns)
+    for pattern in patterns:
         for match in pattern.finditer(content):
             if not is_in_comment_or_string(content, match.start(1)):
                 yield match.group(1)
@@ -149,6 +158,15 @@ def iter_metadata_reference_names(content: str):
         yield match.group(1) or match.group(2)
 
 
+def iter_build_script_reference_names(content: str, ext: str):
+    """Yield source symbols named by explicit build-script rewrites."""
+    if ext != '.sh':
+        return
+    for match in _SED_SYMBOL_REPLACEMENT_PAT.finditer(content):
+        yield match.group(2)
+        yield match.group(3)
+
+
 def build_ref_index(all_files: list[str], *, quiet: bool = False,
                     content_cache: dict[str, str] | None = None,
                     ) -> dict[str, set[str]]:
@@ -174,8 +192,12 @@ def build_ref_index(all_files: list[str], *, quiet: bool = False,
             # APIs (for example d/e/bs).  Dropping them makes live methods
             # look unreferenced and is therefore never safe.
             index[name].add(fp)
-        if os.path.splitext(fp)[1].lower() in REFERENCE_EXTS:
-            for name in iter_metadata_reference_names(content):
+        ext = os.path.splitext(fp)[1].lower()
+        if ext in REFERENCE_EXTS:
+            if ext != '.sh':
+                for name in iter_metadata_reference_names(content):
+                    index[name].add(fp)
+            for name in iter_build_script_reference_names(content, ext):
                 index[name].add(fp)
     if not quiet and total > 100:
         ui.progress_done()

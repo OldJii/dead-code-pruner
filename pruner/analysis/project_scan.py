@@ -14,6 +14,7 @@ import time
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
+from ..adapters import get_adapter
 from ..lang import _PARSERS, SKIP_DIRS
 from .. import lang as _lang
 from .. import ui
@@ -22,7 +23,8 @@ from .method_scanner import scan_method_definitions
 from .field_scanner import scan_fields
 from .ref_index import (
     REFERENCE_EXTS, iter_dynamic_reference_names,
-    iter_implicit_reference_names, iter_metadata_reference_names,
+    iter_build_script_reference_names, iter_implicit_reference_names,
+    iter_metadata_reference_names,
     iter_reference_names,
     iter_type_identifiers,
 )
@@ -36,7 +38,10 @@ from .contracts import ContractGraph
 def _scan_file_chunk(file_infos):
     """Process a chunk of files in a worker process.
 
-    *file_infos* is a list of ``(filepath, ext, module_name)`` tuples.
+    *file_infos* is a list of ``(filepath, ext, module_name, is_generated)``
+    tuples.  Generated files are indexed for references but their
+    definitions are NOT extracted (they must never be deletion candidates).
+
     Returns method/field data plus call-shape, type, and dynamic-reference
     indices.
     """
@@ -51,7 +56,7 @@ def _scan_file_chunk(file_infos):
     content_cache: dict[str, str] = {}
     scan_errors: list[tuple[str, str]] = []
 
-    for fp, ext, mod_name in file_infos:
+    for fp, ext, mod_name, generated in file_infos:
         try:
             with open(fp, 'rb') as f:
                 cb = f.read()
@@ -63,20 +68,21 @@ def _scan_file_chunk(file_infos):
         content_cache[fp] = content
         _lang._current_ext = ext
 
-        root_node, _ = parse(cb)
-        line_offsets = build_line_offsets(cb)
+        if not generated:
+            root_node, _ = parse(cb)
+            line_offsets = build_line_offsets(cb)
 
-        try:
-            file_methods = scan_method_definitions(
-                fp, cb, ext, module=mod_name,
-                root_node=root_node, line_offsets=line_offsets)
-            methods.extend(file_methods)
-        except Exception as exc:
-            scan_errors.append((fp, f"method scan: {exc}"))
+            try:
+                file_methods = scan_method_definitions(
+                    fp, cb, ext, module=mod_name,
+                    root_node=root_node, line_offsets=line_offsets)
+                methods.extend(file_methods)
+            except Exception as exc:
+                scan_errors.append((fp, f"method scan: {exc}"))
 
-        fields_list.extend(
-            scan_fields(fp, cb, ext, module=mod_name,
-                        root_node=root_node, line_offsets=line_offsets))
+            fields_list.extend(
+                scan_fields(fp, cb, ext, module=mod_name,
+                            root_node=root_node, line_offsets=line_offsets))
 
         member_names: set[str] = set()
         for name in iter_reference_names(content, member_names=member_names):
@@ -103,7 +109,8 @@ class ProjectScanResult:
     """Container for all data collected during a unified project scan."""
 
     __slots__ = (
-        'all_files', 'ref_files', 'dead_methods', 'all_methods', 'fields',
+        'all_files', 'ref_files', 'generated_files',
+        'dead_methods', 'all_methods', 'fields',
         'variant_conflicts', 'ref_index', 'member_ref_index', 'type_ref_index',
         'dynamic_ref_index', 'implicit_ref_index', 'contracts', 'layout', 'elapsed',
         'content_cache', 'boundary',
@@ -112,6 +119,7 @@ class ProjectScanResult:
     def __init__(self):
         self.all_files: list[str] = []
         self.ref_files: list[str] = []
+        self.generated_files: set[str] = set()
         self.dead_methods: list[dict] = []
         self.all_methods: list[dict] = []
         self.fields: list[dict] = []
@@ -176,7 +184,8 @@ class ProjectScanResult:
             ext = os.path.splitext(fp)[1].lower()
             if ext in supported:
                 mod_name = self.layout.get_module(fp) if self.layout else None
-                file_infos.append((fp, ext, mod_name))
+                generated = fp in self.generated_files
+                file_infos.append((fp, ext, mod_name, generated))
 
         # Incremental rounds contain far fewer files than the initial scan,
         # but each file still pays full tree-sitter/method/field/contract
@@ -246,7 +255,7 @@ class ProjectScanResult:
         """Sequential fallback for update_files re-scanning."""
         total = len(file_infos)
         interval = max(1, total // 20)
-        for idx, (fp, ext, mod_name) in enumerate(file_infos):
+        for idx, (fp, ext, mod_name, generated) in enumerate(file_infos):
             try:
                 with open(fp, 'rb') as f:
                     cb = f.read()
@@ -255,18 +264,19 @@ class ProjectScanResult:
             content = cb.decode('utf-8', errors='replace')
             self.content_cache[fp] = content
             _lang._current_ext = ext
-            root_node, _ = parse(cb)
-            line_offsets = build_line_offsets(cb)
-            methods = scan_method_definitions(
-                fp, cb, ext, module=mod_name,
-                root_node=root_node, line_offsets=line_offsets)
-            for method in methods:
-                self.all_methods.append(method)
-                if method.get('is_dead_candidate'):
-                    self.dead_methods.append(method)
-            self.fields.extend(
-                scan_fields(fp, cb, ext, module=mod_name,
-                            root_node=root_node, line_offsets=line_offsets))
+            if not generated:
+                root_node, _ = parse(cb)
+                line_offsets = build_line_offsets(cb)
+                methods = scan_method_definitions(
+                    fp, cb, ext, module=mod_name,
+                    root_node=root_node, line_offsets=line_offsets)
+                for method in methods:
+                    self.all_methods.append(method)
+                    if method.get('is_dead_candidate'):
+                        self.dead_methods.append(method)
+                self.fields.extend(
+                    scan_fields(fp, cb, ext, module=mod_name,
+                                root_node=root_node, line_offsets=line_offsets))
             member_names: set[str] = set()
             for name in iter_reference_names(content, member_names=member_names):
                 self.ref_index[name].add(fp)
@@ -364,7 +374,7 @@ def _scan_sequential(result: ProjectScanResult, file_infos: list,
     total = len(file_infos)
     dead_count = 0
 
-    for idx, (fp, ext, mod_name) in enumerate(file_infos):
+    for idx, (fp, ext, mod_name, generated) in enumerate(file_infos):
         if (idx + 1) % progress_interval == 0 or idx + 1 == total:
             ui.progress(idx + 1, total, "Scanning",
                         f"{dead_count} dead methods, "
@@ -380,24 +390,25 @@ def _scan_sequential(result: ProjectScanResult, file_infos: list,
         result.content_cache[fp] = content
         _lang._current_ext = ext
 
-        root_node, _ = parse(cb)
-        line_offsets = build_line_offsets(cb)
+        if not generated:
+            root_node, _ = parse(cb)
+            line_offsets = build_line_offsets(cb)
 
-        try:
-            methods = scan_method_definitions(
-                fp, cb, ext, module=mod_name,
-                root_node=root_node, line_offsets=line_offsets)
-            for method in methods:
-                result.all_methods.append(method)
-                if method.get('is_dead_candidate'):
-                    result.dead_methods.append(method)
-                    dead_count += 1
-        except Exception as e:
-            ui.warn(f"scan {fp}: {e}")
+            try:
+                methods = scan_method_definitions(
+                    fp, cb, ext, module=mod_name,
+                    root_node=root_node, line_offsets=line_offsets)
+                for method in methods:
+                    result.all_methods.append(method)
+                    if method.get('is_dead_candidate'):
+                        result.dead_methods.append(method)
+                        dead_count += 1
+            except Exception as e:
+                ui.warn(f"scan {fp}: {e}")
 
-        result.fields.extend(
-            scan_fields(fp, cb, ext, module=mod_name,
-                        root_node=root_node, line_offsets=line_offsets))
+            result.fields.extend(
+                scan_fields(fp, cb, ext, module=mod_name,
+                            root_node=root_node, line_offsets=line_offsets))
 
         member_names: set[str] = set()
         for name in iter_reference_names(content, member_names=member_names):
@@ -467,17 +478,24 @@ def scan_project(root_dir: str, *, progress_interval: int = 500,
             ext = os.path.splitext(fn)[1].lower()
             if ext in supported:
                 fp = os.path.join(dp, fn)
+                adapter = get_adapter(ext)
+                if adapter and adapter.is_generated_source(fp):
+                    result.generated_files.add(fp)
                 result.all_files.append(fp)
                 result.ref_files.append(fp)
             elif ext in REFERENCE_EXTS:
                 result.ref_files.append(os.path.join(dp, fn))
 
     total = len(result.all_files)
-    ui.info(f"Unified scan: {total} source files")
+    gen_count = len(result.generated_files)
+    gen_info = f" ({gen_count} generated)" if gen_count else ""
+    ui.info(f"Unified scan: {total} source files{gen_info}")
 
-    # Pre-compute module names in the main process (cheap, needs layout)
-    file_infos = [(fp, os.path.splitext(fp)[1].lower(), layout.get_module(fp))
-                  for fp in result.all_files]
+    file_infos = [
+        (fp, os.path.splitext(fp)[1].lower(), layout.get_module(fp),
+         fp in result.generated_files)
+        for fp in result.all_files
+    ]
 
     n_workers = min(os.cpu_count() or 1, max(1, total // 200))
 
@@ -516,7 +534,11 @@ def scan_project(root_dir: str, *, progress_interval: int = 500,
         result.content_cache[fp] = content
         for name in iter_reference_names(content):
             result.ref_index[name].add(fp)
-        for name in iter_metadata_reference_names(content):
+        ext = os.path.splitext(fp)[1].lower()
+        if ext != '.sh':
+            for name in iter_metadata_reference_names(content):
+                result.ref_index[name].add(fp)
+        for name in iter_build_script_reference_names(content, ext):
             result.ref_index[name].add(fp)
         for name in iter_type_identifiers(content):
             result.type_ref_index[name].add(fp)

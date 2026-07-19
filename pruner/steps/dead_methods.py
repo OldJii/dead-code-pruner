@@ -25,6 +25,7 @@ from ..analysis.project_boundary import (
     ProjectBoundary, boundary_allows_record, detect_project_boundary,
 )
 from ..analysis.ref_index import (
+    ANNOTATION_STRING_REF_PATTERN,
     clear_text_index_cache, is_in_comment_or_string,
     iter_dynamic_reference_names, iter_implicit_reference_names,
 )
@@ -49,10 +50,13 @@ def _simplify_files_worker(file_paths):
     errors: list[tuple[str, str]] = []
     for fp in file_paths:
         try:
+            ext = os.path.splitext(fp)[1].lower()
+            adapter = get_adapter(ext)
+            if adapter and adapter.is_generated_source(fp):
+                continue
             with open(fp, 'rb') as f:
                 cb = f.read()
             original_cb = cb
-            ext = os.path.splitext(fp)[1].lower()
             cb = run_pipeline(cb, ext=ext, max_rounds=5)
             if cb != original_cb:
                 with open(fp, 'wb') as f:
@@ -83,10 +87,13 @@ def _scan_field_refs_worker(args):
 def _simplify_single(fp: str) -> str | None:
     """Sequential fallback: simplify one file in-place."""
     try:
+        ext = os.path.splitext(fp)[1].lower()
+        adapter = get_adapter(ext)
+        if adapter and adapter.is_generated_source(fp):
+            return None
         with open(fp, 'rb') as f:
             cb = f.read()
         original_cb = cb
-        ext = os.path.splitext(fp)[1].lower()
         from ..transform import run_pipeline
         cb = run_pipeline(cb, ext=ext, max_rounds=5)
         if cb != original_cb:
@@ -543,7 +550,13 @@ def _collect_unused_methods(scan, contracts, ref_index,
             continue
         if contracts.is_contract_method(m.get('class_name'), m['name']):
             continue
-        if not is_safe_to_remove(m, contracts, boundary=boundary):
+        # Constant inlining and unused-definition deletion have different
+        # eligibility.  A closed-world exported method is not safe to inline,
+        # but it is removable after project-wide absence is proven.  Reuse the
+        # contract-aware promotion policy instead of rejecting it here.
+        if (not is_safe_to_remove(m, contracts, boundary=boundary)
+                and not promote_unreferenced(
+                    m, contracts, False, boundary=boundary)):
             continue
         candidates.append(m)
 
@@ -661,6 +674,13 @@ def _cleanup_unused_fields(scan: ProjectScanResult,
     # Build field_refs: word extraction + frozenset lookup.
     # Workers read from disk (OS page cache makes it fast).
     field_refs: dict[str, set[str]] = defaultdict(set)
+    # Reference-only metadata/build scripts are already parsed by the unified
+    # index.  Seed their precise semantic references before scanning source
+    # words, so build-variant symbols are not mistaken for unused fields.
+    source_files = set(scan.all_files)
+    for name in candidate_names:
+        field_refs[name].update(
+            fp for fp in scan.ref_index.get(name, ()) if fp not in source_files)
     all_file_list = list(scan.all_files)
     n_workers = min(os.cpu_count() or 1,
                     max(1, len(all_file_list) // _MIN_PARALLEL))
@@ -887,8 +907,6 @@ def _has_same_file_refs(dm: dict, cm: dict, content: str) -> bool:
 
 _ANY_CALL_PAT = re.compile(r'(?<!\w)([A-Za-z_]\w*)\s*\(')
 _ANY_METHOD_REF_PAT = re.compile(r'::([A-Za-z_]\w*)\b')
-
-
 def _batch_same_file_refs(
         candidates: list[dict],
         content_cache: dict[str, str] | None = None,
@@ -931,10 +949,19 @@ def _batch_same_file_refs(
                     name = match.group(1)
                     if name not in wanted:
                         continue
-                    if is_in_comment_or_string(content, offset + match.start()):
+                    if is_in_comment_or_string(
+                            content, offset + match.start(1)):
                         continue
                     call_lines[name].add(line_no)
             offset += len(line)
+
+        # Annotation string references (e.g. @EnabledIf("methodName")) are
+        # intentionally inside strings, so they bypass is_in_comment_or_string.
+        for line_no, line in enumerate(content.splitlines()):
+            for match in ANNOTATION_STRING_REF_PATTERN.finditer(line):
+                name_found = match.group(1)
+                if name_found in wanted:
+                    call_lines[name_found].add(line_no)
 
         for method in methods:
             start, end = method['decl_start'], method['decl_end']

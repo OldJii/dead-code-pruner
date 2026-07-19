@@ -49,6 +49,7 @@ def _process_files_worker(args):
     file_paths, replacements = args
     from . import lang as _lang
     from .transform import run_pipeline
+    from .adapters import get_adapter
 
     changed = []
     errors: list[tuple[str, str]] = []
@@ -56,6 +57,9 @@ def _process_files_worker(args):
         try:
             ext = os.path.splitext(fp)[1].lower()
             if ext not in _lang._PARSERS:
+                continue
+            adapter = get_adapter(ext)
+            if adapter and adapter.is_generated_source(fp):
                 continue
             with open(fp, 'rb') as fh:
                 cb = fh.read()

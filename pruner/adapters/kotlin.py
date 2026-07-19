@@ -20,6 +20,12 @@ _ABSTRACT_METHOD = re.compile(
     r'(?m)^\s*(?:public\s+|protected\s+|internal\s+)*abstract\s+fun\s+'
     r'(\w+)\s*\(')
 _TRAILING_LAMBDA_CALL = re.compile(r'(?<!\w)([A-Za-z_]\w*)\s*\{')
+_INFIX_CALL = re.compile(
+    r'''(?x)
+    [A-Za-z0-9_\)\]\}"']
+    \s+([A-Za-z_]\w*)\s+
+    (?=[A-Za-z0-9_\(\[\{"'!+\-])
+    ''')
 
 
 class KotlinAdapter(BaseAdapter):
@@ -35,12 +41,28 @@ class KotlinAdapter(BaseAdapter):
     def local_boolean_patterns(self):
         return (_LOCAL_BOOL,)
 
+    def local_boolean_is_propagatable(
+            self, root, content: bytes, name: bytes, declaration_start: int,
+            declaration_end: int, scope_end: int) -> bool:
+        """Only propagate Kotlin val booleans declared inside a function body."""
+        current = root.descendant_for_byte_range(
+            declaration_start, declaration_end)
+        while current is not None:
+            if current.type == 'property_declaration':
+                break
+            if current.type in (
+                    'function_declaration', 'function_definition',
+                    'secondary_constructor', 'init'):
+                return True
+            current = current.parent
+        return False
+
     @property
     def implicit_call_patterns(self):
-        # Kotlin permits a sole function argument outside parentheses:
-        # ``scheduleBeforeWork { ... }``.  The shared ``name(...)`` index cannot
-        # see this form, so it belongs to the Kotlin adapter.
-        return (_TRAILING_LAMBDA_CALL,)
+        # Kotlin calls may omit parentheses for a trailing lambda or for an
+        # infix function: ``schedule { ... }`` / ``value withWeight 10``.
+        # Neither shape is visible to the shared ``name(...)`` index.
+        return (_TRAILING_LAMBDA_CALL, _INFIX_CALL)
 
     @property
     def field_node_types(self) -> frozenset[str]:
@@ -97,6 +119,10 @@ class KotlinAdapter(BaseAdapter):
         name = record.get('name', '')
         mods = record.get('all_mods', set())
         return name in self.protected_names or name == 'main' or 'override' in mods
+
+    def can_prune_unreferenced_nonconstant(self, record: dict) -> bool:
+        """Private Kotlin declarations are safely removable when unreferenced."""
+        return 'private' in (record.get('all_mods', set()) or set())
 
     def contract_facts(self, content: str) -> dict:
         facts = super().contract_facts(content)

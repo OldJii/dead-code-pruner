@@ -41,6 +41,10 @@ _INTERFACE_BODY = re.compile(r'\btype\s+(\w+)\s+interface\s*\{')
 _INTERFACE_METHOD = re.compile(r'(?m)^\s*(\w+)\s*\(')
 _RECEIVER_METHOD = re.compile(
     r'\bfunc\s*\(\s*\w*\s*\*?\s*(\w+)\s*\)\s*(\w+)\s*\(')
+_GENERIC_CALL = re.compile(
+    r'\b([A-Za-z_]\w*)\s*\[[^\]\n]+\]\s*\(')
+_METHOD_VALUE = re.compile(
+    r'\.\s*([A-Za-z_]\w*)\b(?!\s*\()')
 
 
 class GoAdapter(BaseAdapter):
@@ -59,7 +63,7 @@ class GoAdapter(BaseAdapter):
 
     @property
     def implicit_reference_patterns(self):
-        return CALLABLE_VALUE_PATTERNS
+        return CALLABLE_VALUE_PATTERNS + (_GENERIC_CALL, _METHOD_VALUE)
 
     @property
     def field_node_types(self) -> frozenset[str]:
@@ -124,6 +128,16 @@ class GoAdapter(BaseAdapter):
         name = record.get('name', '')
         return bool(name and name[0].islower())
 
+    def can_prune_unreferenced_nonconstant(self, record: dict) -> bool:
+        """Allow provably unused unexported functions and receiver methods.
+
+        Exported receiver methods may satisfy dependency or standard-library
+        interfaces without an in-project declaration, so deleting them from
+        syntax alone is unsound.
+        """
+        name = record.get('name', '')
+        return bool(name and name[0].islower())
+
     def contract_facts(self, content: str) -> dict:
         facts = super().contract_facts(content)
         iface_methods: dict[str, set[str]] = {}
@@ -140,4 +154,5 @@ class GoAdapter(BaseAdapter):
             for iface, required in iface_methods.items():
                 if required and required <= methods:
                     facts['relations'].setdefault(receiver, set()).add(iface)
+
         return facts

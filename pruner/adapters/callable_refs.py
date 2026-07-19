@@ -16,6 +16,11 @@ CALLABLE_VALUE_PATTERNS = (
         r'(?m)(?:\(|,)\s*'
         r'(?:(?:self|this)\s*\.\s*)?'
         r'([A-Za-z_]\w*)\s*(?=[,)])'),
+    # Return statement: ``return helper`` / ``return self.handler``.
+    re.compile(
+        r'(?m)\breturn\s+'
+        r'(?:(?:self|this)\s*\.\s*)?'
+        r'([A-Za-z_]\w*)\b(?!\s*[(\[{.])'),
 )
 
 

@@ -12,10 +12,6 @@ public class OuterClass {
     }
   }
 
-  private void useFlags() {
-    System.out.println("after inner");
-  }
-
   private static class AnotherInner {
   }
 

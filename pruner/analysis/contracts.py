@@ -14,6 +14,7 @@ model:
 
 from __future__ import annotations
 
+import os
 from collections import defaultdict
 
 from ..adapters import get_adapter
@@ -178,9 +179,14 @@ def is_safe_to_remove(record: dict, graph: ContractGraph, *, boundary=None) -> b
 
     if graph.is_contract_method(cls, name):
         return False
-    if (adapter and adapter.uses_structural_contracts
-            and any(name in methods for methods in graph.iface_methods.values())):
-        return False
+    if adapter and adapter.uses_structural_contracts:
+        if any(name in methods for methods in graph.iface_methods.values()):
+            return False
+        # Exported Go receiver methods may satisfy interfaces declared in
+        # dependencies or the standard library, which syntax-only analysis
+        # cannot enumerate safely.
+        if cls and name and name[0].isupper():
+            return False
 
     from .project_boundary import boundary_allows_record
     if not boundary_allows_record(record, boundary):
@@ -208,9 +214,17 @@ def promote_unreferenced(record: dict, graph: ContractGraph,
 
     cls = record.get('class_name')
     name = record.get('name', '')
+    ext = os.path.splitext(record.get('filepath', ''))[1].lower()
+    adapter = get_adapter(ext) if ext else None
+    if adapter and adapter.is_entry_point(record):
+        return False
     if graph.is_contract_method(cls, name):
         return False
     if cls and cls in graph.iface_abstract:
+        return False
+
+    if (adapter and adapter.uses_structural_contracts
+            and cls and name and name[0].isupper()):
         return False
 
     mods = record.get('all_mods', set()) or set()
@@ -238,4 +252,5 @@ def promote_unreferenced(record: dict, graph: ContractGraph,
         return False
     if cls and graph._class_participates_in_hierarchy(cls):
         return False
+
     return bool(cls)

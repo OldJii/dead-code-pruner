@@ -379,6 +379,214 @@ class LanguageParityTests(unittest.TestCase):
             self.assertIn(
                 'func retired() bool', definition.read_text(encoding='utf-8'))
 
+    def test_go_return_function_value_is_detected_as_reference(self):
+        """Regression: Go functions returned as values (``return handler``)
+        must be detected as referenced.  Without this, the pruner would
+        delete the function definition despite it being used as a value."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'dispatch.go').write_text(
+                'package dispatch\n\n'
+                'type Handler func(string) error\n\n'
+                'func Default() Handler {\n'
+                '\treturn fallbackHandler\n'
+                '}\n\n'
+                'func fallbackHandler(s string) error { return nil }\n',
+                encoding='utf-8')
+            with contextlib.redirect_stdout(io.StringIO()):
+                phase2_step2_cleanup_dead_declarations(tmp, world='closed')
+            content = (root / 'dispatch.go').read_text(encoding='utf-8')
+            self.assertIn('func fallbackHandler', content)
+
+    def test_go_exported_receiver_method_preserved_for_interface_satisfaction(self):
+        """Regression: Go exported receiver methods that match well-known stdlib
+        interface methods (Network, String) or appear in an in-project interface
+        must be preserved even when unreferenced."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'impl.go').write_text(
+                'package impl\n\n'
+                'type myAddr struct{ network, addr string }\n\n'
+                'func (a myAddr) Network() string { return a.network }\n'
+                'func (a myAddr) String() string  { return a.addr }\n'
+                'func (a myAddr) secret() string   { return "x" }\n',
+                encoding='utf-8')
+            with contextlib.redirect_stdout(io.StringIO()):
+                phase2_step2_cleanup_dead_declarations(tmp, world='closed')
+            content = (root / 'impl.go').read_text(encoding='utf-8')
+            self.assertIn('func (a myAddr) Network()', content)
+            self.assertIn('func (a myAddr) String()', content)
+
+    def test_go_exported_receiver_method_preserved_for_external_contracts(self):
+        """Exported receiver methods can satisfy undeclared external interfaces."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'widget.go').write_text(
+                'package widget\n\n'
+                'type Widget struct{ name string }\n\n'
+                'func NewWidget(n string) Widget { return Widget{name: n} }\n\n'
+                'func (w Widget) Name() string { return w.name }\n\n'
+                'func (w Widget) DeprecatedLegacyFormat() string {\n'
+                '\treturn "legacy:" + w.name\n'
+                '}\n',
+                encoding='utf-8')
+            (root / 'main.go').write_text(
+                'package widget\n\n'
+                'func use() {\n'
+                '\tw := NewWidget("a")\n'
+                '\t_ = w.Name()\n'
+                '}\n',
+                encoding='utf-8')
+            with contextlib.redirect_stdout(io.StringIO()):
+                phase2_step2_cleanup_dead_declarations(tmp, world='closed')
+            content = (root / 'widget.go').read_text(encoding='utf-8')
+            self.assertIn('func NewWidget', content)
+            self.assertIn('func (w Widget) Name()', content)
+            self.assertIn('DeprecatedLegacyFormat', content)
+
+    def test_go_generic_call_and_receiver_method_value_are_references(self):
+        """Generic calls and bound method values must keep their declarations."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'helpers.go').write_text(
+                'package sample\n\n'
+                'type cache struct{}\n'
+                'func newIndex[T any]() *T { return new(T) }\n'
+                'func (c *cache) evict(key string) {}\n'
+                'func (c *cache) setup() { register(c.evict) }\n',
+                encoding='utf-8')
+            (root / 'caller.go').write_text(
+                'package sample\n\n'
+                'func use() { _ = newIndex[string]() }\n',
+                encoding='utf-8')
+            with contextlib.redirect_stdout(io.StringIO()):
+                phase2_step2_cleanup_dead_declarations(tmp, world='closed')
+            content = (root / 'helpers.go').read_text(encoding='utf-8')
+            self.assertIn('func newIndex[T any]', content)
+            self.assertIn('func (c *cache) evict', content)
+
+    def test_java_record_methods_are_detected_and_cross_file_refs_work(self):
+        """Regression: Java records (``public record Foo(...)`` ) must be
+        recognised as class-level declarations.  Methods on records must
+        correctly find cross-file references."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'MyRecord.java').write_text(
+                'public record MyRecord(String name) {\n'
+                '  public static MyRecord of(String n) { return new MyRecord(n); }\n'
+                '  private static void dead() {}\n'
+                '}\n', encoding='utf-8')
+            (root / 'Caller.java').write_text(
+                'class Caller {\n'
+                '  MyRecord create() { return MyRecord.of("x"); }\n'
+                '}\n', encoding='utf-8')
+            with contextlib.redirect_stdout(io.StringIO()):
+                phase2_step2_cleanup_dead_declarations(tmp, world='closed')
+            record_content = (root / 'MyRecord.java').read_text(encoding='utf-8')
+            self.assertIn('public static MyRecord of', record_content)
+            self.assertNotIn('dead()', record_content)
+
+    def test_java_annotation_type_in_class_node_types(self):
+        """Regression: ``annotation_type_declaration`` must be in
+        ``JavaAdapter.class_node_types`` so that methods declared inside
+        annotation types receive a correct ``class_name``."""
+        from pruner.adapters.java import JavaAdapter
+        adapter = JavaAdapter()
+        self.assertIn('annotation_type_declaration', adapter.class_node_types)
+
+    def test_java_annotation_type_not_deleted_when_referenced(self):
+        """Annotation types that are referenced should not be deleted even
+        though they have no regular method declarations."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'MyAnnotation.java').write_text(
+                'public @interface MyAnnotation {\n'
+                '  String value() default "";\n'
+                '}\n', encoding='utf-8')
+            (root / 'Usage.java').write_text(
+                '@MyAnnotation(value = "test")\n'
+                'class Usage {\n'
+                '  void run() {}\n'
+                '}\n', encoding='utf-8')
+            with contextlib.redirect_stdout(io.StringIO()):
+                phase2_step2_cleanup_dead_declarations(tmp, world='closed')
+            self.assertTrue(
+                (root / 'MyAnnotation.java').exists(),
+                "annotation type file should not be deleted")
+
+    def test_swift_multiline_return_is_not_treated_as_bare_exit(self):
+        """Regression: Swift ``return`` followed by the value expression
+        on the next line must not be treated as a bare exit.  Tree-sitter
+        parses it as two sibling nodes, but the code is NOT unreachable."""
+        source = (
+            'func test() -> [String] {\n'
+            '    return\n'
+            '      ["a"]\n'
+            '      + ["b"]\n'
+            '}\n'
+        ).encode()
+        result = run_pipeline(source, ext='.swift')
+        self.assertIn(b'["a"]', result)
+        self.assertIn(b'["b"]', result)
+
+    def test_swift_computed_property_multiline_return_is_preserved(self):
+        source = (
+            'struct Values {\n'
+            '  var description: String {\n'
+            '    return\n'
+            '      values.map(String.init).joined(separator: ",")\n'
+            '  }\n'
+            '}\n'
+        ).encode()
+        result = run_pipeline(source, ext='.swift')
+        self.assertIn(b'values.map', result)
+
+    def test_swift_bare_return_followed_by_statement_is_unreachable(self):
+        """Regression: code after a truly bare ``return`` in a void function
+        must be deleted when the next sibling is a statement/declaration type,
+        not an expression that could be a multi-line return continuation."""
+        source = (
+            'func cleanup() {\n'
+            '    return\n'
+            '    let x = 42\n'
+            '    print(x)\n'
+            '}\n'
+        ).encode()
+        result = run_pipeline(source, ext='.swift')
+        self.assertNotIn(b'let x = 42', result)
+        self.assertNotIn(b'print(x)', result)
+        self.assertIn(b'return', result)
+
+    def test_swift_void_return_followed_by_call_is_unreachable(self):
+        source = (
+            'func cleanup() {\n'
+            '    return\n'
+            '    print("dead")\n'
+            '}\n'
+        ).encode()
+        result = run_pipeline(source, ext='.swift')
+        self.assertNotIn(b'print', result)
+
+    def test_swift_conditional_compilation_directives_are_preserved(self):
+        """Regression: Swift ``#if``/``#else``/``#endif`` directives must not
+        be removed by unreachable code elimination.  They are compile-time
+        constructs that control cross-platform compilation."""
+        source = (
+            'func value() -> Int {\n'
+            '    #if os(Windows)\n'
+            '    return 1\n'
+            '    #else\n'
+            '    return 2\n'
+            '    #endif\n'
+            '}\n'
+        ).encode()
+        result = run_pipeline(source, ext='.swift')
+        self.assertIn(b'#if os(Windows)', result)
+        self.assertIn(b'#else', result)
+        self.assertIn(b'#endif', result)
+        self.assertIn(b'return 1', result)
+        self.assertIn(b'return 2', result)
+
     def test_non_jvm_boolean_folding_keeps_left_operand_evaluation(self):
         cases = {
             '.go': b'package p\nvar a = side() && false\nvar b = side() || true\n',
@@ -398,6 +606,232 @@ class LanguageParityTests(unittest.TestCase):
             b'class W { val a = side() && false }', ext='.kt')
         self.assertIn(b'boolean a = false', java)
         self.assertIn(b'val a = false', kotlin)
+
+
+    def test_dart_static_modifier_detected_on_methods_and_getters(self):
+        """Regression: Dart ``static`` modifier appears as a direct child node
+        of type ``'static'`` in the AST, not inside a ``modifiers`` wrapper.
+        The scanner must detect it for both regular methods and getters."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'helper.dart').write_text(
+                'class Helper {\n'
+                '  static bool _isLocal(String x) {\n'
+                '    return x.startsWith("10.");\n'
+                '  }\n'
+                '  static bool get useLegacy => false;\n'
+                '}\n', encoding='utf-8')
+            with contextlib.redirect_stdout(io.StringIO()):
+                phase2_step2_cleanup_dead_declarations(tmp, world='closed')
+            content = (root / 'helper.dart').read_text(encoding='utf-8')
+            self.assertNotIn('_isLocal', content)
+            self.assertNotIn('useLegacy', content)
+
+    def test_dart_private_unreferenced_methods_are_pruned(self):
+        """Dart private (underscore-prefixed) methods should be prunable
+        when unreferenced, since privacy is library-scoped."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'util.dart').write_text(
+                'String greet() => "hello";\n'
+                'String _unused() => "never called";\n',
+                encoding='utf-8')
+            (root / 'main.dart').write_text(
+                'import "util.dart";\n'
+                'void main() { print(greet()); }\n',
+                encoding='utf-8')
+            with contextlib.redirect_stdout(io.StringIO()):
+                phase2_step2_cleanup_dead_declarations(tmp, world='closed')
+            content = (root / 'util.dart').read_text(encoding='utf-8')
+            self.assertIn('greet', content)
+            self.assertNotIn('_unused', content)
+
+    def test_dart_generic_private_function_call_is_preserved(self):
+        """Generic invocations use ``name<T>(...)`` rather than ``name(...)``."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / 'worker.dart'
+            source.write_text(
+                'void start() { run((value) => _worker<String>(value)); }\n'
+                'String _worker<T>(T value) => value.toString();\n',
+                encoding='utf-8')
+            with contextlib.redirect_stdout(io.StringIO()):
+                phase2_step2_cleanup_dead_declarations(tmp, world='closed')
+            self.assertIn('_worker<T>', source.read_text(encoding='utf-8'))
+
+    def test_dart_generated_files_are_not_modified(self):
+        """Regression: Dart files matching generated-code naming conventions
+        (.g.dart, .freezed.dart, .gen.dart) must not have definitions deleted
+        or code simplified, even though they are scanned for references."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'strings_en.g.dart').write_text(
+                'class GeneratedStrings {\n'
+                '  String get accept => "Accept";\n'
+                '  String get cancel => "Cancel";\n'
+                '  static void _unused() {}\n'
+                '}\n', encoding='utf-8')
+            (root / 'app.dart').write_text(
+                'import "strings_en.g.dart";\n'
+                'void main() {\n'
+                '  final s = GeneratedStrings();\n'
+                '  print(s.accept);\n'
+                '}\n', encoding='utf-8')
+            with contextlib.redirect_stdout(io.StringIO()):
+                phase2_step2_cleanup_dead_declarations(tmp, world='closed')
+            content = (root / 'strings_en.g.dart').read_text(encoding='utf-8')
+            self.assertIn('get accept', content)
+            self.assertIn('get cancel', content)
+            self.assertIn('_unused', content)
+
+    def test_dart_generated_files_provide_references(self):
+        """Generated Dart files must still be indexed for outgoing references
+        so that symbols called only FROM generated code are preserved."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'helper.dart').write_text(
+                'String _format(String s) => s.toUpperCase();\n',
+                encoding='utf-8')
+            (root / 'generated.g.dart').write_text(
+                'import "helper.dart";\n'
+                'String build() => _format("hello");\n',
+                encoding='utf-8')
+            with contextlib.redirect_stdout(io.StringIO()):
+                phase2_step2_cleanup_dead_declarations(tmp, world='closed')
+            content = (root / 'helper.dart').read_text(encoding='utf-8')
+            self.assertIn('_format', content)
+
+    def test_shell_variant_rewrite_preserves_dart_symbol(self):
+        """A symbol selected by a build-variant sed rewrite is live."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'provider.dart').write_text(
+                'final defaultProvider = Object();\n'
+                'final fossProvider = Object();\n', encoding='utf-8')
+            (root / 'page.dart').write_text(
+                'void main() { print(defaultProvider); }\n', encoding='utf-8')
+            (root / 'build_foss.sh').write_text(
+                "sed -i 's/defaultProvider/fossProvider/g' page.dart\n",
+                encoding='utf-8')
+            with contextlib.redirect_stdout(io.StringIO()):
+                phase2_step2_cleanup_dead_declarations(tmp, world='closed')
+            content = (root / 'provider.dart').read_text(encoding='utf-8')
+            self.assertIn('fossProvider', content)
+
+    # ── Annotation-string method references ─────────────────────
+
+    def test_jvm_annotation_string_ref_preserves_method(self):
+        """JUnit 5 @EnabledIf / @MethodSource reference methods by string
+        argument — such methods must not be deleted as unreferenced."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'Test.java').write_text(
+                'import org.junit.jupiter.api.Test;\n'
+                'import org.junit.jupiter.api.condition.EnabledIf;\n\n'
+                'class TestCompression {\n'
+                '    @EnabledIf("brotliAvailable")\n'
+                '    @Test\n'
+                '    void testBrotli() {}\n\n'
+                '    private static boolean brotliAvailable() {\n'
+                '        return true;\n'
+                '    }\n\n'
+                '    private static boolean unreferencedHelper() {\n'
+                '        return false;\n'
+                '    }\n'
+                '}\n', encoding='utf-8')
+            with contextlib.redirect_stdout(io.StringIO()):
+                phase2_step2_cleanup_dead_declarations(tmp, world='closed')
+            content = (root / 'Test.java').read_text(encoding='utf-8')
+            self.assertIn('brotliAvailable', content,
+                          "@EnabledIf-referenced method must be preserved")
+            self.assertNotIn('unreferencedHelper', content,
+                             "truly unreferenced method should be deleted")
+
+    def test_kotlin_annotation_string_ref_preserves_method(self):
+        """Kotlin @MethodSource annotation references must also be detected."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'Test.kt').write_text(
+                'import org.junit.jupiter.params.provider.MethodSource\n\n'
+                'class ParamTest {\n'
+                '    @MethodSource("dataProvider")\n'
+                '    fun testData() {}\n\n'
+                '    companion object {\n'
+                '        @JvmStatic\n'
+                '        private fun dataProvider() = listOf("a", "b")\n'
+                '    }\n'
+                '}\n', encoding='utf-8')
+            with contextlib.redirect_stdout(io.StringIO()):
+                phase2_step2_cleanup_dead_declarations(tmp, world='closed')
+            content = (root / 'Test.kt').read_text(encoding='utf-8')
+            self.assertIn('dataProvider', content,
+                          "@MethodSource-referenced method must be preserved")
+
+
+    def test_swift_empty_struct_referenced_by_dot_self_preserved(self):
+        """Swift struct referenced via Type.self must not be deleted as empty."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'main.swift').write_text(
+                'struct Foo: ParsableCommand {}\n'
+                'private struct Bar: ParsableCommand {}\n\n'
+                'let types: [Any.Type] = [Foo.self, Bar.self]\n',
+                encoding='utf-8')
+            with contextlib.redirect_stdout(io.StringIO()):
+                phase2_step2_cleanup_dead_declarations(tmp, world='closed')
+            content = (root / 'main.swift').read_text(encoding='utf-8')
+            self.assertIn('Bar', content,
+                          "Empty struct referenced via .self must be preserved")
+
+    def test_kotlin_class_field_not_propagated(self):
+        """Class-level val booleans must not be propagated as local constants."""
+        code = (
+            b'class Config(val enabled: Boolean = false) {\n'
+            b'    fun render() = if (enabled) "on" else "off"\n'
+            b'}\n'
+        )
+        result = run_pipeline(code, [], ext='.kt')
+        self.assertIn(b'enabled', result,
+                      "Class constructor param must not be propagated")
+        self.assertIn(b'if (enabled)', result,
+                      "if-expression using class param must be preserved")
+
+    def test_java_boolean_field_is_not_treated_as_unused_local(self):
+        """A nested-class field may be referenced outside its class body."""
+        code = (
+            b'class PackageManager {\n'
+            b'    void update(SYNC sync, boolean success) {\n'
+            b'        sync.success = success;\n'
+            b'        if (!sync.success) throw new IllegalStateException();\n'
+            b'    }\n'
+            b'    private static final class SYNC {\n'
+            b'        boolean success = false;\n'
+            b'    }\n'
+            b'}\n'
+        )
+        result = run_pipeline(code, [], ext='.java')
+        self.assertIn(b'boolean success = false;', result)
+        self.assertIn(b'sync.success = success;', result)
+
+    def test_kotlin_private_infix_extension_call_is_preserved(self):
+        """Infix calls do not use ``name(...)`` syntax but are real references."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / 'Lesson.kt'
+            source.write_text(
+                'class Lesson {\n'
+                '  fun test() {\n'
+                '    val pair = "custom content" withWeight 10\n'
+                '    println(pair)\n'
+                '  }\n'
+                '  private infix fun String.withWeight(weight: Int): Pair<String, Int> {\n'
+                '    return Pair(this, weight)\n'
+                '  }\n'
+                '}\n', encoding='utf-8')
+            with contextlib.redirect_stdout(io.StringIO()):
+                phase2_step2_cleanup_dead_declarations(tmp, world='closed')
+            self.assertIn(
+                'fun String.withWeight', source.read_text(encoding='utf-8'))
 
 
 if __name__ == '__main__':

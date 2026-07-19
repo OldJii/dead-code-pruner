@@ -61,6 +61,14 @@ class BaseAdapter(ABC):
         """Return language-derived ``private/static/final`` flags."""
         return {}
 
+    def is_generated_source(self, filepath: str) -> bool:
+        """Whether *filepath* is machine-generated and must not be modified.
+
+        Generated files are still scanned for references (callers) but are
+        excluded from transformations and definition deletions.
+        """
+        return False
+
     def field_reference_names(self, declaration, content: bytes,
                               name: str) -> frozenset[str]:
         """Return source or generated symbols that can reference a field.

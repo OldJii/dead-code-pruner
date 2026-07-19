@@ -21,7 +21,7 @@ _METHOD_NODE_SET = frozenset({
 })
 _CLASS_NODE_TYPES = frozenset({
     'class_declaration', 'class_definition', 'object_declaration',
-    'interface_declaration', 'enum_declaration',
+    'interface_declaration', 'enum_declaration', 'record_declaration',
 })
 _SKIP_NAME_PATTERNS = ('__find_views_',)
 
@@ -72,6 +72,13 @@ def _get_source_set(filepath: str) -> str | None:
     return None
 
 
+_MODIFIER_KEYWORDS = frozenset({
+    'static', 'final', 'const', 'abstract', 'override',
+    'private', 'public', 'protected', 'internal', 'open',
+    'external', 'late', 'covariant',
+})
+
+
 def _get_modifiers(node, cb) -> set[str]:
     """Extract modifier keywords from a method/function declaration."""
     mods = set()
@@ -84,9 +91,11 @@ def _get_modifiers(node, cb) -> set[str]:
         if t in ('modifier', 'visibility_modifier', 'member_modifier',
                  'function_modifier', 'inheritance_modifier', 'access_control'):
             mods.add(txt(c, cb).strip())
-        if t == 'modifiers':
+        elif t == 'modifiers':
             for mc in c.children:
                 mods.add(txt(mc, cb).strip())
+        elif t in _MODIFIER_KEYWORDS:
+            mods.add(t)
     return mods
 
 

@@ -7,6 +7,7 @@ widgets have a well-defined lifecycle (``build``, ``initState``,
 
 from __future__ import annotations
 
+import os
 import re
 
 from .base import BaseAdapter
@@ -44,9 +45,27 @@ _TYPE_DECL = re.compile(
 _ABSTRACT_BODY = re.compile(r'\babstract\s+class\s+(\w+)\b[^\{]*\{')
 _ABSTRACT_METHOD = re.compile(
     r'(?m)^\s*(?:[\w<>?,\[\]]+\s+)(\w+)\s*\([^;{]*\)\s*;')
+_GENERIC_CALL = re.compile(
+    r'\b([A-Za-z_]\w*)\s*<[^>\n]+>\s*\(')
+
+
+_GENERATED_SUFFIXES = ('.g.dart', '.freezed.dart', '.gen.dart', '.mapper.dart')
+
+_GENERATED_HEADER = b'GENERATED CODE'
 
 
 class DartAdapter(BaseAdapter):
+
+    def is_generated_source(self, filepath: str) -> bool:
+        basename = os.path.basename(filepath)
+        if any(basename.endswith(s) for s in _GENERATED_SUFFIXES):
+            return True
+        try:
+            with open(filepath, 'rb') as f:
+                header = f.read(256)
+            return _GENERATED_HEADER in header
+        except Exception:
+            return False
 
     @property
     def protected_names(self) -> frozenset[str]:
@@ -125,7 +144,7 @@ class DartAdapter(BaseAdapter):
 
     @property
     def implicit_reference_patterns(self):
-        return CALLABLE_VALUE_PATTERNS
+        return CALLABLE_VALUE_PATTERNS + (_GENERIC_CALL,)
 
     def parameter_count(self, declaration, content: bytes) -> int | None:
         signature = declaration
@@ -196,6 +215,13 @@ class DartAdapter(BaseAdapter):
         if 'override' in mods:
             return True
         return False
+
+    def can_prune_unreferenced_nonconstant(self, record: dict) -> bool:
+        """Private (underscore-prefixed) Dart declarations are safely removable
+        when provably unreferenced, since Dart's leading-underscore privacy is
+        scoped to the library."""
+        name = record.get('name', '')
+        return name.startswith('_')
 
     def compute_safe_to_inline(self, record: dict) -> bool:
         if self.is_entry_point(record):

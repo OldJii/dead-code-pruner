@@ -11,9 +11,11 @@ Step 6 dead-branch elimination runs.
 
 import re
 
+from ..analysis.ref_index import is_in_comment_or_string
+
 
 def _kt_find_non_comment(pat, code: str):
-    """Return the first non-comment match of *pat* together with its line start."""
+    """Return the first non-comment/string match of *pat*."""
     offset = 0
     while True:
         m = pat.search(code, offset)
@@ -22,13 +24,14 @@ def _kt_find_non_comment(pat, code: str):
         ls = code.rfind('\n', 0, m.start())
         ls = ls + 1 if ls >= 0 else 0
         before = code[ls:m.start()].strip()
-        if not before.startswith('//'):
-            return m, ls
-        offset = m.end()
+        if before.startswith('//') or is_in_comment_or_string(code, m.start()):
+            offset = m.end()
+            continue
+        return m, ls
 
 
 def _kt_find_assignment_if(pat, code: str):
-    """Return the first non-comment match in an assignment context."""
+    """Return the first non-comment/string match in an assignment context."""
     offset = 0
     while True:
         m = pat.search(code, offset)
@@ -37,7 +40,7 @@ def _kt_find_assignment_if(pat, code: str):
         ls = code.rfind('\n', 0, m.start())
         ls = ls + 1 if ls >= 0 else 0
         before = code[ls:m.start()].strip()
-        if before.startswith('//'):
+        if before.startswith('//') or is_in_comment_or_string(code, m.start()):
             offset = m.end()
             continue
         prefix_stripped = before.rstrip()

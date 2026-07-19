@@ -282,10 +282,11 @@ def phase2_step5_cleanup_empty_artifacts(
     # Build a lightweight ref_index for class name lookups.
     class_names_needed = {cn for _, cn, _, _ in empty_classes}
     if scan is not None:
-        class_ref_index = {
-            name: set(scan.ref_index.get(name, set()))
-            for name in class_names_needed
-        }
+        class_ref_index = {}
+        for name in class_names_needed:
+            refs = set(scan.ref_index.get(name, set()))
+            refs |= set(scan.type_ref_index.get(name, set()))
+            class_ref_index[name] = refs
         ui.info("Reusing unified project reference index")
     else:
         class_ref_index: dict[str, set[str]] = {}

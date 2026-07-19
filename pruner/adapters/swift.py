@@ -110,6 +110,12 @@ class SwiftAdapter(BaseAdapter):
         mods = record.get('all_mods', set()) or set()
         return 'private' in mods or 'fileprivate' in mods
 
+    def can_prune_unreferenced_nonconstant(self, record: dict) -> bool:
+        """Private/fileprivate Swift declarations are safely removable when
+        provably unreferenced — they cannot be accessed outside their scope."""
+        mods = record.get('all_mods', set()) or set()
+        return 'private' in mods or 'fileprivate' in mods
+
     def contract_facts(self, content: str) -> dict:
         facts = super().contract_facts(content)
         for match in _TYPE_DECL.finditer(content):

@@ -45,12 +45,17 @@ _RUNTIME_BOUND_TYPE_ANNOTATIONS = frozenset({
 })
 
 
+_JAVA_CLASS_TYPES = frozenset({
+    'class_declaration', 'interface_declaration',
+    'enum_declaration', 'annotation_type_declaration',
+    'record_declaration',
+})
+
+
 def _enclosing_type(node):
     current = node.parent
     while current:
-        if current.type in {
-                'class_declaration', 'interface_declaration',
-                'enum_declaration', 'annotation_type_declaration'}:
+        if current.type in _JAVA_CLASS_TYPES:
             return current
         current = current.parent
     return None
@@ -121,6 +126,14 @@ class JavaAdapter(BaseAdapter):
     @property
     def protected_names(self) -> frozenset[str]:
         return JVM_PROTECTED_NAMES
+
+    @property
+    def class_node_types(self) -> frozenset[str]:
+        return frozenset({
+            'class_declaration', 'interface_declaration',
+            'enum_declaration', 'record_declaration',
+            'annotation_type_declaration',
+        })
 
     @property
     def local_boolean_patterns(self):
@@ -244,8 +257,9 @@ class JavaAdapter(BaseAdapter):
                 or 'override' in mods or 'Override' in mods)
 
     def can_prune_unreferenced_nonconstant(self, record: dict) -> bool:
-        """Java static calls and method references are explicitly indexable."""
-        return bool(record.get('is_static'))
+        """Private and static Java methods are safely removable when
+        unreferenced — both are resolvable without type inference."""
+        return bool(record.get('is_private') or record.get('is_static'))
 
     def contract_facts(self, content: str) -> dict:
         facts = super().contract_facts(content)

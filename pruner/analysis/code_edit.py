@@ -372,9 +372,6 @@ def has_cross_file_refs(dm: dict, ref_index: dict, src_abs: str,
     can_use_secondary_indices = (
         type_ref_index is not None
         and dynamic_ref_index is not None
-        # Lowercase/non-conventional type names are intentionally absent
-        # from the compact type index; use the exact fallback scan for them.
-        and (not cls or cls in type_ref_index)
     )
     if can_use_secondary_indices:
         external_refs = {rf for rf in ref_files
@@ -406,6 +403,10 @@ def has_cross_file_refs(dm: dict, ref_index: dict, src_abs: str,
                             pending.append(descendant)
             if external_refs & contextual_files:
                 return True
+        elif not cls:
+            # Top-level functions are called by bare/package-qualified name.
+            # Any external language-index hit is direct evidence.
+            return True
 
         # A public instance method may be invoked through a factory return,
         # fluent chain, inferred local type, or dependency-injection result,

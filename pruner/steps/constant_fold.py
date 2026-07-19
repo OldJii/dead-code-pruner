@@ -213,10 +213,14 @@ def _find_enclosing_scope(cb: bytes, pos: int, ext: str,
 
 
 def _extract_scoped_bool_constants(
-        cb: bytes, patterns, ext: str) -> list[tuple[bytes, bytes, int, int, int, int]]:
+        cb: bytes, patterns, ext: str
+        ) -> list[tuple[bytes, bytes, int, int, int, int, int]]:
     """Find immutable local boolean declarations with their enclosing scopes.
 
-    Returns ``[(name, value, decl_start, decl_end, scope_start, scope_end), ...]``.
+    Returns ``[(name, value, decl_start, match_end, decl_end,
+    scope_start, scope_end), ...]``.  ``match_end`` distinguishes a standalone
+    declaration from one embedded in a multi-statement line; ``decl_end`` is
+    the start of the following line used for propagation.
     """
     results = []
     code = _masked_code(cb, ext)
@@ -239,7 +243,8 @@ def _extract_scoped_bool_constants(
                     and not adapter.local_boolean_is_propagatable(
                         root, code, name, m.start(), decl_end, scope_end)):
                 continue
-            results.append((name, value, m.start(), decl_end, scope_start, scope_end))
+            results.append((name, value, m.start(), m.end(), decl_end,
+                            scope_start, scope_end))
     return results
 
 
@@ -258,7 +263,7 @@ def phase1_step2_propagate_local_constants(
         if not constants:
             break
         prev = cb
-        for name, value, _ds, decl_end, _ss, scope_end in constants:
+        for name, value, _ds, _match_end, decl_end, _ss, scope_end in constants:
             after_decl = cb[decl_end:scope_end]
             pat = rb'\b' + re.escape(name) + rb'\b'
             new_after = _tokenize_and_replace(after_decl, pat, value, ext)
@@ -275,43 +280,33 @@ def phase1_step2_propagate_local_constants(
 def phase1_step8_remove_unused_bool_vars(
         cb: bytes, ext: str = '.java') -> bytes:
     """Remove declarations of boolean variables whose names no longer appear
-    within the same enclosing scope."""
+    within the same enclosing callable scope.
+
+    Candidate discovery is deliberately shared with constant propagation so
+    this cleanup cannot broaden the policy and mistake a class field for a
+    local variable merely because both use the same declaration syntax.
+    """
     adapter = get_adapter(ext)
     patterns = adapter.local_boolean_patterns if adapter else ()
     for _ in range(10):
         changed = False
         code = _masked_code(cb, ext)
-        for pat in patterns:
-            for m in pat.finditer(code):
-                name = m.group(1)
-                if name in _TYPE_NAMES:
-                    continue
-                line_start = cb.rfind(b'\n', 0, m.start()) + 1
-                line_end = cb.find(b'\n', m.end())
-                if line_end < 0:
-                    line_end = len(cb)
-                prefix = cb[line_start:m.start()]
-                suffix = cb[m.end():line_end]
-                if prefix.strip() or suffix.strip(b' \t;'):
-                    continue
-                scope_start, scope_end = _find_enclosing_scope(
-                    cb, m.start(), ext, code)
-                if scope_start < 0:
-                    continue
-                le = cb.find(b'\n', m.end())
-                decl_end = le + 1 if le != -1 else m.end()
-                scope_rest = cb[decl_end:scope_end]
-                use_pat = re.compile(rb'\b' + re.escape(name) + rb'\b')
-                if not use_pat.search(scope_rest):
-                    ls = line_start
-                    if le == -1:
-                        le = len(cb)
-                    else:
-                        le += 1
-                    cb = cb[:ls] + cb[le:]
-                    changed = True
-                    break
-            if changed:
+        candidates = _extract_scoped_bool_constants(cb, patterns, ext)
+        for (name, _value, decl_start, match_end, decl_end,
+             _scope_start, scope_end) in candidates:
+            line_start = cb.rfind(b'\n', 0, decl_start) + 1
+            line_end = cb.find(b'\n', decl_start)
+            if line_end < 0:
+                line_end = len(cb)
+            prefix = cb[line_start:decl_start]
+            declaration_tail = cb[match_end:line_end]
+            if prefix.strip() or declaration_tail.strip(b' \t;'):
+                continue
+            scope_rest = cb[decl_end:scope_end]
+            use_pat = re.compile(rb'\b' + re.escape(name) + rb'\b')
+            if not use_pat.search(scope_rest):
+                cb = cb[:line_start] + cb[decl_end:]
+                changed = True
                 break
         if not changed:
             break
