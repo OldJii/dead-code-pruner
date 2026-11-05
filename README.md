@@ -77,7 +77,7 @@ The cleanup is intentionally conservative. Annotated declarations, framework ent
 Python 3.10 or newer is required.
 
 ```bash
-git clone https://github.com/OldJii/dead-code-pruner.git
+git clone https://github.com/folay-git/dead-code-pruner.git
 cd dead-code-pruner
 pip install -r requirements.txt
 cp pruner.example.yaml pruner.yaml

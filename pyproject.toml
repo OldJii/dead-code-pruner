@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 authors = [
-  { name = "Oldjii", email = "mail@folay.top" }
+  { name = "folay-git", email = "mail@folay.top" }
 ]
 keywords = [
   "dead-code",
@@ -48,10 +48,10 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/OldJii/dead-code-pruner"
-Repository = "https://github.com/OldJii/dead-code-pruner"
-Issues = "https://github.com/OldJii/dead-code-pruner/issues"
-Releases = "https://github.com/OldJii/dead-code-pruner/releases"
+Homepage = "https://github.com/folay-git/dead-code-pruner"
+Repository = "https://github.com/folay-git/dead-code-pruner"
+Issues = "https://github.com/folay-git/dead-code-pruner/issues"
+Releases = "https://github.com/folay-git/dead-code-pruner/releases"
 
 [project.scripts]
 dead-code-pruner = "pruner.cli:main"

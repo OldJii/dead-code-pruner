@@ -6,8 +6,8 @@ dead-code-pruner uses tree-sitter to replace permanently true/false feature flag
 
 ## Documentation
 
-- [README](https://github.com/OldJii/dead-code-pruner/blob/main/README.md): Pipeline, configuration, architecture, and usage
-- [pruner.example.yaml](https://github.com/OldJii/dead-code-pruner/blob/main/pruner.example.yaml): Example config
+- [README](https://github.com/folay-git/dead-code-pruner/blob/main/README.md): Pipeline, configuration, architecture, and usage
+- [pruner.example.yaml](https://github.com/folay-git/dead-code-pruner/blob/main/pruner.example.yaml): Example config
 
 ## Pipeline
 
