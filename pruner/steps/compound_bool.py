@@ -87,28 +87,30 @@ def _may_evaluate_effects(node, cb) -> bool:
 
     Calls are the important cross-language case.  The node-name check handles
     normal trees, while the text fallback covers grammars that split a call
-    into identifier/selector nodes (notably Dart).
+    into identifier/selector nodes (notably Dart).  ``++``/``--`` are matched
+    as tokens because Kotlin models them as plain ``unary_expression`` nodes.
     """
     stack = [node]
     while stack:
         current = stack.pop()
         node_type = getattr(current, 'type', '')
         if ('call' in node_type or node_type in {
-                'await_expression', 'assignment_expression',
-                'update_expression'}):
+                'await_expression', 'assignment_expression', 'assignment',
+                'update_expression', '++', '--'}):
             return True
         stack.extend(getattr(current, 'children', ()))
     return bool(re.search(r'\b[A-Za-z_]\w*\s*\(', txt(node, cb)))
 
 
 def phase1_step4_simplify_compound_expressions(
-        cb: bytes, *, preserve_left_effects: bool = False) -> bytes:
+        cb: bytes, *, preserve_left_effects: bool = True) -> bytes:
     """Simplify compound expressions.
 
     ``expr && false`` and ``expr || true`` evaluate ``expr`` before reaching
-    the right-hand constant.  Non-JVM adapters opt into preserving that left
-    operand because it may contain a function call or another side effect.
-    The default retains the established Java/Kotlin behavior byte-for-byte.
+    the right-hand constant, and ``expr`` may contain a function call or
+    another side effect.  By default the expression is kept in that case for
+    every language; pass ``preserve_left_effects=False`` only to discard it
+    on purpose.
     """
     for _ in range(500):
         root, cb = parse(cb)

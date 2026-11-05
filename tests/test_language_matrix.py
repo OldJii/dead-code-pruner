@@ -587,11 +587,15 @@ class LanguageParityTests(unittest.TestCase):
         self.assertIn(b'return 1', result)
         self.assertIn(b'return 2', result)
 
-    def test_non_jvm_boolean_folding_keeps_left_operand_evaluation(self):
+    def test_boolean_folding_keeps_left_operand_evaluation(self):
         cases = {
             '.go': b'package p\nvar a = side() && false\nvar b = side() || true\n',
             '.swift': b'let a = side() && false\nlet b = side() || true\n',
             '.dart': b'final a = side() && false;\nfinal b = side() || true;\n',
+            '.java': (b'class W { void m() { boolean a = side() && false;'
+                      b' boolean b = side() || true; } }'),
+            '.kt': (b'class W { fun m() { val a = side() && false\n'
+                    b'val b = side() || true } }'),
         }
         for extension, source in cases.items():
             with self.subTest(extension=extension):
@@ -599,13 +603,36 @@ class LanguageParityTests(unittest.TestCase):
                 self.assertIn(b'side() && false', result)
                 self.assertIn(b'side() || true', result)
 
-        # Java/Kotlin deliberately retain the established Android output.
+    def test_jvm_boolean_folding_keeps_non_call_side_effects(self):
+        java_cases = [
+            b'i++ > 0 && false',
+            b'(x = f) != null && false',
+            b'new Foo() != null && false',
+            b'check(() -> 1) && false',
+        ]
+        for expression in java_cases:
+            with self.subTest(language='java', expression=expression):
+                source = b'class W { void m() { boolean a = ' + expression + b'; } }'
+                self.assertIn(expression, run_pipeline(source, ext='.java'))
+
+        kotlin_cases = [b'i++ > 0 && false', b'--i > 0 && false',
+                        b'a?.b() == true && false']
+        for expression in kotlin_cases:
+            with self.subTest(language='kotlin', expression=expression):
+                source = b'class W { fun m() { val a = ' + expression + b' } }'
+                self.assertIn(expression, run_pipeline(source, ext='.kt'))
+
+    def test_jvm_boolean_folding_still_removes_pure_operands(self):
         java = run_pipeline(
-            b'class W { boolean a = side() && false; }', ext='.java')
+            b'class W { void m() { boolean a = x == y && false;'
+            b' boolean b = flag || true; } }', ext='.java')
         kotlin = run_pipeline(
-            b'class W { val a = side() && false }', ext='.kt')
+            b'class W { fun m() { val a = x == y && false\n'
+            b'val b = flag || true } }', ext='.kt')
         self.assertIn(b'boolean a = false', java)
+        self.assertIn(b'boolean b = true', java)
         self.assertIn(b'val a = false', kotlin)
+        self.assertIn(b'val b = true', kotlin)
 
 
     def test_dart_static_modifier_detected_on_methods_and_getters(self):

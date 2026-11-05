@@ -50,11 +50,11 @@ fun case2_5() { alive() }
 fun case3_1() {
 }
 
-fun case3_2() { val b = false }
+fun case3_2() { val b = isChinese() && false }
 
 fun case3_3() { doSomething() }
 
-fun case3_4() { val b = true }
+fun case3_4() { val b = someCondition() || true }
 
 fun case3_7() {
 }
@@ -326,7 +326,7 @@ fun case18_1(): Boolean {
     if (debugBuild && debugFlag) {
         return true
     }
-    return false
+    return isReady() && false
 }
 
 // ============================================================

@@ -62,7 +62,7 @@ public class TestAllCases {
 
   // Case 2.7: (false) → false（去括号）
   void case2_7() {
-    boolean b = false;
+    boolean b = isSomething() && false;
   }
 
   // Case 2.8: 嵌套括号 ((true)) — 多轮收敛处理
@@ -77,11 +77,11 @@ public class TestAllCases {
   void case3_1() {
   }
 
-  void case3_2() { boolean b = false; }
+  void case3_2() { boolean b = isChinese() && false; }
 
   void case3_3() { doSomething(); }
 
-  void case3_4() { boolean b = true; }
+  void case3_4() { boolean b = someCondition() || true; }
 
   void case3_5() { int val = countDownTimes % (4); }
 
@@ -549,12 +549,13 @@ public class TestAllCases {
 
   // Case 15.5: 赋值 = 应该作为边界
   void case15_5() {
-    use(false);
+    boolean result = someCondition() && false;
+    use(result);
   }
 
   // Case 15.6: 复合赋值 += 也应该作为边界
   void case15_6() {
-    flags += false;
+    flags += getFlags() && false;
   }
 
   // Case 15.7: a == b || true 不能变成 a == true
@@ -574,12 +575,12 @@ public class TestAllCases {
 
   // Case 15.10: 三元表达式中 EXPR && false（ternary 中 : 作为边界）
   void case15_10() {
-    String s = condition ? getA() : false;
+    String s = condition ? getA() : getB() && false;
   }
 
   // Case 15.11: 三元表达式中 EXPR && false（? 作为边界）
   void case15_11() {
-    boolean ok = someCheck() ? false : defaultVal;
+    boolean ok = someCheck() ? getValue() && false : defaultVal;
   }
 
   // Case 15.12: 多个比较混合 && false
@@ -592,6 +593,9 @@ public class TestAllCases {
 
   // Case 15.14: 方法调用返回值比较 && false
   void case15_14() {
+    if (list.size() == 0 && false) {
+      doSomething();
+    }
   }
 
   // Case 15.15: a == b && c == d && false（链式 && 全为 false）
@@ -735,7 +739,8 @@ public class TestAllCases {
     if (Config.DEBUG_BUILD && core.user.debugFlag.get()) {
       return true;
     }
-    return false;
+    return !"control".equals(ABManager.valueOfUserAb("feature"))
+        && false;
   }
 
   // Case 18.2: try-catch 后的 return EXPR && false
@@ -745,7 +750,7 @@ public class TestAllCases {
     } catch (Exception e) {
       log(e);
     }
-    return false;
+    return isReady() && false;
   }
 
   // Case 18.3: 多个 if 块后的 return
@@ -756,7 +761,7 @@ public class TestAllCases {
     if (conditionB()) {
       return false;
     }
-    return false;
+    return getResult() && false;
   }
 
   // Case 18.4: for 循环后的 expr && false
@@ -764,6 +769,7 @@ public class TestAllCases {
     for (int i = 0; i < 10; i++) {
       process(i);
     }
+    boolean result = compute() && false;
   }
 
   // ============================================================
